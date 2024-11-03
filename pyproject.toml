@@ -1,0 +1,9 @@
+[tool.black]
+line-length = 80
+target-version = ["py311"]
+
+[tool.isort]
+src_paths = ["dltoolkit"]
+profile = "black"
+line_length = 80
+lines_after_imports = 2

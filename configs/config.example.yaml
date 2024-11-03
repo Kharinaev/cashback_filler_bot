@@ -1,0 +1,31 @@
+db:
+  api_key: "YOUR_API_KEY_HERE"
+  db_id: "YOUR_DATABASE_ID_HERE"
+
+vlm:
+  api_token: "YOUR_VLM_API_TOKEN_HERE"
+  base_url: "VLM_PROVIDER_URL"
+  model_name: "MODEL_NAME"
+  prompt_template_file: "PATH_TO_YOUR_TEMPLATE_FILE.md"
+  sampling_params:
+    max_tokens: 512
+    temperature: 0.2
+    top_p: 0.9
+
+bot:
+  token: "YOUR_BOT_TOKEN_HERE"
+  users:
+    - tg_username: "YOUR_TG_USERNAME"
+      db_username: "YOUR_DB_USERNAME"
+    - tg_username: "YOUR_TG_USERNAME"
+      db_username: "YOUR_DB_USERNAME"
+
+  images_path: "YOUR_IMAGES_PATH"
+
+  messages:
+    start_message: "Welcome! Send a screenshot from your banking app for processing 📱"
+    refuse_message: "Sorry, I cannot communicate with you."
+    processing_message: "Processing... 🔄"
+    ok_message: "Added these categories:"
+    continue_message: "You can send another screenshot 📨"
+    not_ok_message: "Something went wrong, please try again. Contact support if the issue persists."
