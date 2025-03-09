@@ -53,8 +53,10 @@ class Pipeline:
             row["Date"] = date
 
         logger.info(f"Processed response from VLM: {rows}")
+        return rows
+
+    def save_rows_to_database(self, rows):
+        """Save processed rows to Notion database"""
         for row in rows:
             self.notion.add_row_to_database(row)
-
         logger.info("Rows added to Notion")
-        return rows
