@@ -167,7 +167,8 @@ cython_debug/
 *.ipynb_checkpoints
 run_test.py
 notebooks/*
-configs/config.yaml
+configs/config*.yaml
+!configs/config.example.yaml
 archive/*
 data/*
 outputs/*

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from notion_client import Client
 
 
@@ -18,6 +20,49 @@ class NotionDB:
         ]
 
         return category_names
+
+    def get_current_month_rows(self):
+        """Return all cashback rows dated within the current month."""
+        month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+
+        rows = []
+        start_cursor = None
+        while True:
+            query = {
+                "database_id": self.db_id,
+                "filter": {
+                    "property": "Date",
+                    "date": {"on_or_after": month_start},
+                },
+            }
+            if start_cursor:
+                query["start_cursor"] = start_cursor
+
+            response = self.client.databases.query(**query)
+
+            for page in response["results"]:
+                props = page["properties"]
+
+                categories = [
+                    cat["name"] for cat in props["Category"]["multi_select"]
+                ]
+                bank = props["Bank"]["select"]
+                person = props["Person"]["select"]
+
+                rows.append(
+                    {
+                        "Category": categories[0] if categories else None,
+                        "Percent": props["Percent"]["number"],
+                        "Bank": bank["name"] if bank else None,
+                        "Person": person["name"] if person else None,
+                    }
+                )
+
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+
+        return rows
 
     def check_row_data(self, row_data):
         for field in self.required_fields:

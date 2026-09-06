@@ -1,0 +1,23 @@
+[Unit]
+Description=Cashback Autocomplete Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cashback_autocomplete
+ExecStart=/opt/cashback_autocomplete/.venv/bin/python /opt/cashback_autocomplete/run_bot.py --config_path=/opt/cashback_autocomplete/configs/config.yaml
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# Basic hardening. The bot still needs network access and write access to data/.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cashback_autocomplete/data
+
+[Install]
+WantedBy=multi-user.target

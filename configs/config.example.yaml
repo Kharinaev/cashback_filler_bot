@@ -29,3 +29,4 @@ bot:
     ok_message: "Added these categories:"
     continue_message: "You can send another screenshot 📨"
     not_ok_message: "Something went wrong, please try again. Contact support if the issue persists."
+    empty_list_message: "No cashbacks found for this month 🤷"

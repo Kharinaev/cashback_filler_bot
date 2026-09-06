@@ -224,6 +224,82 @@ async def start(
         logger.info(f"Refused to user @{username}")
 
 
+# Display name and color emoji for each bank
+BANK_DISPLAY = {
+    "Tinkoff": ("ТБанк", "🟡"),
+    "Alfa": ("Альфа", "🔴"),
+    "Ozon": ("Ozon", "🔵"),
+}
+
+# Order in which banks are shown within a person's cashbacks
+BANK_ORDER = ["Tinkoff", "Alfa", "Ozon"]
+
+
+def format_percent(percent):
+    if percent is None:
+        return ""
+    if float(percent).is_integer():
+        return f"{int(percent)}%"
+    return f"{percent}%"
+
+
+def format_cashback_list(rows):
+    # Group rows by (person, bank)
+    groups = {}
+    for row in rows:
+        key = (row["Person"], row["Bank"])
+        groups.setdefault(key, []).append(row)
+
+    def sort_key(item):
+        (person, bank), _ = item
+        bank_idx = (
+            BANK_ORDER.index(bank) if bank in BANK_ORDER else len(BANK_ORDER)
+        )
+        return (person or "", bank_idx, bank or "")
+
+    blocks = []
+    for (person, bank), group in sorted(groups.items(), key=sort_key):
+        bank_name, emoji = BANK_DISPLAY.get(bank, (bank or "—", ""))
+        header = f"{person or '—'} {bank_name} {emoji}".rstrip()
+        lines = [header]
+        for i, row in enumerate(group, 1):
+            category = row["Category"] or "—"
+            lines.append(f"{i}. {category} {format_percent(row['Percent'])}")
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
+async def list_cashbacks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    pipeline,
+    refuse_message: str = "",
+    empty_message: str = "No cashbacks found.",
+    not_ok_message: str = "not_ok",
+    allowed_users: dict = {},
+) -> None:
+    username = update.effective_user.username
+    if username not in allowed_users:
+        await update.message.reply_text(refuse_message)
+        logger.info(f"Refused to user @{username}")
+        return
+
+    logger.info(f"List command for user @{username}")
+    try:
+        rows = pipeline.notion.get_current_month_rows()
+        if not rows:
+            await update.message.reply_text(empty_message)
+            return
+
+        message = format_cashback_list(rows)
+        await update.message.reply_text(message)
+        logger.info(f"Sent cashback list to user @{username}")
+    except Exception as e:
+        logger.error(f"Error building cashback list for @{username} - {e}")
+        await update.message.reply_text(not_ok_message)
+
+
 async def handle_image(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -330,6 +406,21 @@ def run_bot(cfg):
                 processing_message=cfg["bot"]["messages"]["processing_message"],
                 ok_message=cfg["bot"]["messages"]["ok_message"],
                 continue_message=cfg["bot"]["messages"]["continue_message"],
+                not_ok_message=cfg["bot"]["messages"]["not_ok_message"],
+                allowed_users=allowed_users,
+            ),
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            "list",
+            partial(
+                list_cashbacks,
+                pipeline=pipe,
+                refuse_message=cfg["bot"]["messages"]["refuse_message"],
+                empty_message=cfg["bot"]["messages"].get(
+                    "empty_list_message", "На этот месяц кэшбэков пока нет 🤷"
+                ),
                 not_ok_message=cfg["bot"]["messages"]["not_ok_message"],
                 allowed_users=allowed_users,
             ),

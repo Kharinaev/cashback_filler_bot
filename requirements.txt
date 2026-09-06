@@ -6,6 +6,7 @@ Pillow>=10.0.0  # For image processing
 pyyaml>=6.0.0  # For config files
 fire>=0.7.0  # For CLI
 openai==1.51.1  # For VLM
+httpx<0.28  # Compatible with openai 1.51.x
 
 # Development dependencies
 black>=23.0.0
