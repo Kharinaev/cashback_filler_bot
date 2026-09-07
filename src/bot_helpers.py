@@ -29,6 +29,13 @@ def canonical_bank(value):
     return aliases.get(normalized, original)
 
 
+def parse_card_last4(value):
+    card = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}", card):
+        raise ValueError("Card must contain exactly four digits")
+    return card
+
+
 def category_match_score(query, category):
     query = normalize_text(query)
     category = normalize_text(category)

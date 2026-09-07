@@ -3,6 +3,7 @@ from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from src.bot_helpers import parse_card_last4
 from src.sheet_colors import conditional_color_rule, value_color
 
 
@@ -16,6 +17,7 @@ class GoogleSheetsDB:
         "Limit, ₽",
         "Info",
     ]
+    CARD_COLUMNS = ["Person", "Bank", "Card"]
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
     def __init__(
@@ -24,6 +26,7 @@ class GoogleSheetsDB:
         spreadsheet_id,
         cashbacks_sheet="Cashbacks",
         categories_sheet="Categories",
+        cards_sheet="Cards",
     ):
         credentials_path = Path(credentials_file)
         credentials = Credentials.from_service_account_file(
@@ -39,6 +42,7 @@ class GoogleSheetsDB:
         self.spreadsheet_id = spreadsheet_id
         self.cashbacks_sheet = cashbacks_sheet
         self.categories_sheet = categories_sheet
+        self.cards_sheet = cards_sheet
         self.required_fields = [
             "Category",
             "Percent",
@@ -46,6 +50,7 @@ class GoogleSheetsDB:
             "Person",
             "Date",
         ]
+        self._ensure_cards_sheet()
         self._validate_schema()
 
     @staticmethod
@@ -76,10 +81,45 @@ class GoogleSheetsDB:
             self.categories_sheet,
             "A1:A1",
         )
+        cards_header = self._get_values(self.cards_sheet, "A1:C1")
         if not cashbacks_header or cashbacks_header[0] != self.COLUMNS:
             raise ValueError("Cashbacks sheet has an unexpected header")
         if not categories_header or categories_header[0] != ["Category"]:
             raise ValueError("Categories sheet has an unexpected header")
+        if not cards_header or cards_header[0] != self.CARD_COLUMNS:
+            raise ValueError("Cards sheet has an unexpected header")
+
+    def _ensure_cards_sheet(self):
+        metadata = (
+            self.client.spreadsheets()
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                fields="sheets.properties(title)",
+            )
+            .execute()
+        )
+        titles = {sheet["properties"]["title"] for sheet in metadata["sheets"]}
+        if self.cards_sheet not in titles:
+            self.client.spreadsheets().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "addSheet": {
+                                "properties": {"title": self.cards_sheet}
+                            }
+                        }
+                    ]
+                },
+            ).execute()
+        header = self._get_values(self.cards_sheet, "A1:C1")
+        if not header:
+            self.client.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=self._range(self.cards_sheet, "A1:C1"),
+                valueInputOption="RAW",
+                body={"values": [self.CARD_COLUMNS]},
+            ).execute()
 
     def get_unique_categories(self):
         return self.get_reference_values("Category")
@@ -158,6 +198,17 @@ class GoogleSheetsDB:
                 color,
             ),
         ]
+        if field in ("Person", "Bank") and self.cards_sheet in sheet_ids:
+            card_columns = {"Person": 0, "Bank": 1}
+            requests.append(
+                conditional_color_rule(
+                    sheet_ids[self.cards_sheet],
+                    card_columns[field],
+                    1000,
+                    value,
+                    color,
+                )
+            )
         self.client.spreadsheets().batchUpdate(
             spreadsheetId=self.spreadsheet_id,
             body={"requests": requests},
@@ -193,21 +244,34 @@ class GoogleSheetsDB:
     def get_current_month_rows(self):
         return self.get_month_rows(datetime.now().strftime("%Y-%m"))
 
+    @classmethod
+    def row_key(cls, row_data):
+        values = []
+        for column in cls.COLUMNS:
+            value = row_data.get(column, "")
+            if column == "Percent":
+                try:
+                    value = f"{float(value):g}"
+                except (TypeError, ValueError):
+                    pass
+            values.append(cls._comparable_value(value))
+        return tuple(values)
+
     @staticmethod
     def _comparable_value(value):
         if isinstance(value, float) and value.is_integer():
             return str(int(value))
         return str(value).strip()
 
-    def delete_row(self, row_number, expected_row):
+    def _delete_sheet_row(self, sheet_name, columns, row_number, expected_row):
         current = self._get_values(
-            self.cashbacks_sheet,
-            f"A{row_number}:G{row_number}",
+            sheet_name,
+            f"A{row_number}:{chr(64 + len(columns))}{row_number}",
         )
         if not current:
             raise ValueError("The selected row no longer exists")
-        actual = current[0] + [""] * (len(self.COLUMNS) - len(current[0]))
-        expected = self._serialize_row(expected_row)
+        actual = current[0] + [""] * (len(columns) - len(current[0]))
+        expected = [expected_row.get(column, "") for column in columns]
         if [self._comparable_value(value) for value in actual] != [
             self._comparable_value(value) for value in expected
         ]:
@@ -222,11 +286,11 @@ class GoogleSheetsDB:
             .execute()
         )
         sheet_id = next(
-            sheet["properties"]["sheetId"]
-            for sheet in metadata["sheets"]
-            if sheet["properties"]["title"] == self.cashbacks_sheet
+            sheet_item["properties"]["sheetId"]
+            for sheet_item in metadata["sheets"]
+            if sheet_item["properties"]["title"] == sheet_name
         )
-        return (
+        (
             self.client.spreadsheets()
             .batchUpdate(
                 spreadsheetId=self.spreadsheet_id,
@@ -247,6 +311,16 @@ class GoogleSheetsDB:
             )
             .execute()
         )
+        return None
+
+    def delete_row(self, row_number, expected_row):
+        self.check_row_data(expected_row)
+        return self._delete_sheet_row(
+            self.cashbacks_sheet,
+            self.COLUMNS,
+            row_number,
+            expected_row,
+        )
 
     def check_row_data(self, row_data):
         for field in self.required_fields:
@@ -258,7 +332,24 @@ class GoogleSheetsDB:
         return [row_data.get(column, "") for column in self.COLUMNS]
 
     def add_row_to_database(self, row_data):
-        return (
+        saved, _ = self.add_rows_if_new([row_data])
+        return bool(saved)
+
+    def add_rows_if_new(self, rows):
+        existing_keys = {self.row_key(row) for row in self.get_all_rows()}
+        saved = []
+        duplicates = []
+        for row in rows:
+            self.check_row_data(row)
+            key = self.row_key(row)
+            if key in existing_keys:
+                duplicates.append(row)
+                continue
+            saved.append(row)
+            existing_keys.add(key)
+        if not saved:
+            return saved, duplicates
+        (
             self.client.spreadsheets()
             .values()
             .append(
@@ -266,9 +357,54 @@ class GoogleSheetsDB:
                 range=self._range(self.cashbacks_sheet, "A:G"),
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
-                body={"values": [self._serialize_row(row_data)]},
+                body={"values": [self._serialize_row(row) for row in saved]},
             )
             .execute()
+        )
+        return saved, duplicates
+
+    def get_cards_with_indices(self):
+        values = self._get_values(self.cards_sheet, "A2:C")
+        rows = []
+        for row_number, values_row in enumerate(values, start=2):
+            padded = values_row + [""] * (
+                len(self.CARD_COLUMNS) - len(values_row)
+            )
+            if not any(str(value).strip() for value in padded):
+                continue
+            row = dict(zip(self.CARD_COLUMNS, padded))
+            row["Card"] = str(row["Card"]).strip().zfill(4)
+            rows.append((row_number, row))
+        return rows
+
+    def get_cards(self, person=None, bank=None):
+        rows = [row for _, row in self.get_cards_with_indices()]
+        if person is not None:
+            rows = [row for row in rows if row["Person"] == person]
+        if bank is not None:
+            rows = [row for row in rows if row["Bank"] == bank]
+        return rows
+
+    def add_card(self, person, bank, card):
+        card = parse_card_last4(card)
+        existing = self.get_cards(person=person, bank=bank)
+        if any(row["Card"] == card for row in existing):
+            return False
+        self.client.spreadsheets().values().append(
+            spreadsheetId=self.spreadsheet_id,
+            range=self._range(self.cards_sheet, "A:C"),
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [[person, bank, card]]},
+        ).execute()
+        return True
+
+    def delete_card(self, row_number, expected_row):
+        return self._delete_sheet_row(
+            self.cards_sheet,
+            self.CARD_COLUMNS,
+            row_number,
+            expected_row,
         )
 
     def replace_rows(self, rows):

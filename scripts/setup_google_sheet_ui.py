@@ -24,13 +24,19 @@ def column(values, index):
     return [row[index] for row in values if len(row) > index]
 
 
-def validation_request(sheet_id, column_index, source_range, message):
+def validation_request(
+    sheet_id,
+    column_index,
+    source_range,
+    message,
+    row_count=TARGET_ROWS,
+):
     return {
         "setDataValidation": {
             "range": {
                 "sheetId": sheet_id,
                 "startRowIndex": 1,
-                "endRowIndex": TARGET_ROWS,
+                "endRowIndex": row_count,
                 "startColumnIndex": column_index,
                 "endColumnIndex": column_index + 1,
             },
@@ -44,6 +50,57 @@ def validation_request(sheet_id, column_index, source_range, message):
                 "showCustomUi": True,
             },
             "filteredRowsIncluded": True,
+        }
+    }
+
+
+def card_validation_request(sheet_id, argument_separator=","):
+    return {
+        "setDataValidation": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "endRowIndex": REFERENCE_ROWS,
+                "startColumnIndex": 2,
+                "endColumnIndex": 3,
+            },
+            "rule": {
+                "condition": {
+                    "type": "CUSTOM_FORMULA",
+                    "values": [
+                        {
+                            "userEnteredValue": (
+                                "=REGEXMATCH(TO_TEXT(C2)"
+                                f'{argument_separator}"^[0-9]{{4}}$")'
+                            )
+                        }
+                    ],
+                },
+                "inputMessage": "Введите последние четыре цифры карты",
+                "strict": True,
+                "showCustomUi": True,
+            },
+            "filteredRowsIncluded": True,
+        }
+    }
+
+
+def plain_text_request(sheet_id, column_index, row_count):
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "endRowIndex": row_count,
+                "startColumnIndex": column_index,
+                "endColumnIndex": column_index + 1,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "numberFormat": {"type": "TEXT", "pattern": "@"}
+                }
+            },
+            "fields": "userEnteredFormat.numberFormat",
         }
     }
 
@@ -148,8 +205,20 @@ def main():
         config = yaml.safe_load(config_file)
 
     database = GoogleSheetsDB(**config["db"])
+    properties = (
+        database.client.spreadsheets()
+        .get(
+            spreadsheetId=database.spreadsheet_id,
+            fields="properties(locale)",
+        )
+        .execute()["properties"]
+    )
+    formula_separator = (
+        ";" if properties.get("locale", "").startswith("ru") else ","
+    )
     values = database._get_values(database.cashbacks_sheet, "A2:G")
     references = database._get_values(database.categories_sheet, "A2:C")
+    cards_values = database._get_values(database.cards_sheet, "A2:C")
 
     configured_people = [
         user["db_username"] for user in config["bot"].get("users", [])
@@ -209,11 +278,13 @@ def main():
     }
     cashbacks = sheets[database.cashbacks_sheet]
     dictionaries = sheets[database.categories_sheet]
+    cards = sheets[database.cards_sheet]
     cashbacks_id = cashbacks["properties"]["sheetId"]
     dictionaries_id = dictionaries["properties"]["sheetId"]
+    cards_id = cards["properties"]["sheetId"]
 
     requests = []
-    for sheet in (cashbacks, dictionaries):
+    for sheet in (cashbacks, dictionaries, cards):
         for banding in sheet.get("bandedRanges", []):
             requests.append(
                 {"deleteBanding": {"bandedRangeId": banding["bandedRangeId"]}}
@@ -221,6 +292,7 @@ def main():
     for sheet, target_columns in (
         (cashbacks, {0, 2, 3}),
         (dictionaries, {0, 1, 2}),
+        (cards, {0, 1}),
     ):
         rules = sheet.get("conditionalFormats", [])
         for index in range(len(rules) - 1, -1, -1):
@@ -236,6 +308,7 @@ def main():
     for sheet_id, row_count in (
         (cashbacks_id, TARGET_ROWS),
         (dictionaries_id, REFERENCE_ROWS),
+        (cards_id, REFERENCE_ROWS),
     ):
         requests.append(
             {
@@ -259,8 +332,10 @@ def main():
         [
             header_format(cashbacks_id, 7),
             header_format(dictionaries_id, 3),
+            header_format(cards_id, 3),
             banding_request(cashbacks_id, TARGET_ROWS, 7),
             banding_request(dictionaries_id, REFERENCE_ROWS, 3),
+            banding_request(cards_id, REFERENCE_ROWS, 3),
             validation_request(
                 cashbacks_id,
                 0,
@@ -279,6 +354,22 @@ def main():
                 "=Categories!$B$2:$B$1000",
                 "Выберите пользователя из справочника",
             ),
+            validation_request(
+                cards_id,
+                0,
+                "=Categories!$B$2:$B$1000",
+                "Выберите пользователя из справочника",
+                row_count=REFERENCE_ROWS,
+            ),
+            validation_request(
+                cards_id,
+                1,
+                "=Categories!$C$2:$C$1000",
+                "Выберите банк из справочника",
+                row_count=REFERENCE_ROWS,
+            ),
+            card_validation_request(cards_id, formula_separator),
+            plain_text_request(cards_id, 2, REFERENCE_ROWS),
             {
                 "setBasicFilter": {
                     "filter": {
@@ -288,6 +379,19 @@ def main():
                             "endRowIndex": TARGET_ROWS,
                             "startColumnIndex": 0,
                             "endColumnIndex": 7,
+                        }
+                    }
+                }
+            },
+            {
+                "setBasicFilter": {
+                    "filter": {
+                        "range": {
+                            "sheetId": cards_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": REFERENCE_ROWS,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 3,
                         }
                     }
                 }
@@ -303,6 +407,10 @@ def main():
     requests.extend(
         dimension_request(dictionaries_id, index, width)
         for index, width in enumerate([230, 140, 120])
+    )
+    requests.extend(
+        dimension_request(cards_id, index, width)
+        for index, width in enumerate([160, 140, 120])
     )
     for category in categories:
         color = value_color("Category", category)
@@ -326,6 +434,9 @@ def main():
                 dictionaries_id, 1, REFERENCE_ROWS, person, color
             )
         )
+        requests.append(
+            conditional_color_rule(cards_id, 0, REFERENCE_ROWS, person, color)
+        )
     for bank in banks:
         color = value_color("Bank", bank)
         requests.append(
@@ -336,6 +447,9 @@ def main():
                 dictionaries_id, 2, REFERENCE_ROWS, bank, color
             )
         )
+        requests.append(
+            conditional_color_rule(cards_id, 1, REFERENCE_ROWS, bank, color)
+        )
 
     database.client.spreadsheets().batchUpdate(
         spreadsheetId=database.spreadsheet_id,
@@ -345,6 +459,7 @@ def main():
     print(f"Categories: {len(categories)}")
     print(f"People: {len(people)}")
     print(f"Banks: {len(banks)}")
+    print(f"Cards: {len(cards_values)}")
 
 
 if __name__ == "__main__":

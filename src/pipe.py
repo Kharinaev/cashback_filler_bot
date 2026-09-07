@@ -18,6 +18,7 @@ class Pipeline:
             spreadsheet_id=cfg["db"]["spreadsheet_id"],
             cashbacks_sheet=cfg["db"].get("cashbacks_sheet", "Cashbacks"),
             categories_sheet=cfg["db"].get("categories_sheet", "Categories"),
+            cards_sheet=cfg["db"].get("cards_sheet", "Cards"),
         )
 
         self.vlm = VLM(
@@ -60,6 +61,10 @@ class Pipeline:
 
     def save_rows_to_database(self, rows):
         """Save processed rows to Google Sheets."""
-        for row in rows:
-            self.db.add_row_to_database(row)
-        logger.info("Rows added to Google Sheets")
+        saved, duplicates = self.db.add_rows_if_new(rows)
+        logger.info(
+            "Rows added to Google Sheets: %s; duplicates skipped: %s",
+            len(saved),
+            len(duplicates),
+        )
+        return saved, duplicates

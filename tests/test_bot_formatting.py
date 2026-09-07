@@ -1,0 +1,33 @@
+import pytest
+
+
+bot = pytest.importorskip("src.bot")
+
+
+def test_cashback_list_includes_all_cards_for_person_and_bank():
+    rows = [
+        {
+            "Person": "Алёна",
+            "Bank": "Tinkoff",
+            "Category": "Транспорт",
+            "Percent": 5,
+        }
+    ]
+    cards = [
+        {"Person": "Алёна", "Bank": "Tinkoff", "Card": "0123"},
+        {"Person": "Алёна", "Bank": "Tinkoff", "Card": "9876"},
+        {"Person": "Алёна", "Bank": "Alfa", "Card": "5555"},
+    ]
+
+    text = bot.format_cashback_list(rows, cards)
+
+    assert "👤 Алёна · 🟡 ТБанк" in text
+    assert "Карты 0123, 9876" in text
+    assert "1. Транспорт — 5%" in text
+    assert "5555" not in text
+
+
+def test_duplicate_message_reports_saved_and_skipped_counts():
+    assert bot.save_result_message([{}], [{}, {}]) == (
+        "✅ Сохранено записей: 1.\nℹ️ Полных дублей пропущено: 2."
+    )

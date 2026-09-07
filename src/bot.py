@@ -7,6 +7,7 @@ from src.bot_helpers import (
     canonical_bank,
     frequent_values,
     month_start,
+    parse_card_last4,
     parse_percent,
     search_category_rows,
 )
@@ -63,10 +64,23 @@ class DeleteState:
         self.options = []
 
 
+class CardState:
+    def __init__(self, action, rows=None):
+        self.action = action
+        self.rows = rows or []
+        self.stage = "person"
+        self.person = None
+        self.bank = None
+        self.card = None
+        self.record = None
+        self.options = []
+
+
 # Store edit states for each user
 edit_states = {}
 manual_states = {}
 delete_states = {}
+card_states = {}
 
 
 # Display name and color emoji for each bank.
@@ -106,6 +120,37 @@ def format_rows_preview(rows, title="Проверьте распознанные
             ]
         )
     return "\n".join(lines)
+
+
+def card_numbers(cards, person, bank):
+    return sorted(
+        {
+            str(row["Card"]).zfill(4)
+            for row in cards
+            if row["Person"] == person and row["Bank"] == bank
+        }
+    )
+
+
+def format_cards_line(numbers):
+    if not numbers:
+        return "Карты не добавлены"
+    if len(numbers) == 1:
+        return f"Карта {numbers[0]}"
+    return f"Карты {', '.join(numbers)}"
+
+
+def save_result_message(saved, duplicates):
+    if duplicates and not saved:
+        return "ℹ️ Все записи уже есть в таблице — дубли не добавлены."
+    if duplicates:
+        return (
+            f"✅ Сохранено записей: {len(saved)}.\n"
+            f"ℹ️ Полных дублей пропущено: {len(duplicates)}."
+        )
+    if len(saved) == 1:
+        return "✅ Категория сохранена."
+    return f"✅ Сохранено записей: {len(saved)}."
 
 
 def create_edit_keyboard(rows):
@@ -194,12 +239,14 @@ async def handle_edit_callback(
                 for row in state.edited_rows:
                     for field in ("Category", "Person", "Bank"):
                         pipeline.db.ensure_reference_value(field, row[field])
-                pipeline.save_rows_to_database(state.edited_rows)
+                saved, duplicates = pipeline.save_rows_to_database(
+                    state.edited_rows
+                )
                 logger.info(
                     f"Successfully saved edited rows for user @{username} (ID: {user_id})"
                 )
                 await query.message.reply_text(
-                    "✅ Категории сохранены.",
+                    save_result_message(saved, duplicates),
                     reply_markup=main_menu_keyboard(),
                 )
             except Exception:
@@ -289,6 +336,7 @@ def main_menu_keyboard():
                     "📅 Выбрать месяц", callback_data="menu:month"
                 ),
             ],
+            [InlineKeyboardButton("💳 Карты", callback_data="menu:cards")],
         ]
     )
 
@@ -353,6 +401,7 @@ async def start(
         user_id = update.effective_user.id
         manual_states.pop(user_id, None)
         delete_states.pop(user_id, None)
+        card_states.pop(user_id, None)
         edit_states.pop(user_id, None)
         await update.effective_message.reply_text(
             f"{start_message}\n\n"
@@ -370,10 +419,11 @@ async def cancel_workflow(update, context):
     user_id = update.effective_user.id
     had_state = any(
         user_id in states
-        for states in (manual_states, delete_states, edit_states)
+        for states in (manual_states, delete_states, card_states, edit_states)
     )
     manual_states.pop(user_id, None)
     delete_states.pop(user_id, None)
+    card_states.pop(user_id, None)
     edit_states.pop(user_id, None)
     message = (
         "Текущее действие отменено." if had_state else "Активных действий нет."
@@ -383,7 +433,7 @@ async def cancel_workflow(update, context):
     )
 
 
-def format_cashback_list(rows):
+def format_cashback_list(rows, cards):
     # Group rows by (person, bank)
     groups = {}
     for row in rows:
@@ -400,7 +450,12 @@ def format_cashback_list(rows):
     blocks = []
     for (person, bank), group in sorted(groups.items(), key=sort_key):
         header = f"👤 {person or '—'} · {bank_label(bank)}"
-        lines = [header]
+        lines = [
+            header,
+            "",
+            format_cards_line(card_numbers(cards, person, bank)),
+            "",
+        ]
         for i, row in enumerate(group, 1):
             category = row["Category"] or "—"
             lines.append(f"{i}. {category} — {format_percent(row['Percent'])}")
@@ -439,6 +494,7 @@ async def begin_manual_add(
     )
     state.options = pipeline.db.get_reference_values("Bank")
     delete_states.pop(update.effective_user.id, None)
+    card_states.pop(update.effective_user.id, None)
     edit_states.pop(update.effective_user.id, None)
     manual_states[update.effective_user.id] = state
     await update.effective_message.reply_text(
@@ -575,7 +631,7 @@ async def save_manual_cashback(update, state, pipeline):
     try:
         for field in ("Category", "Person", "Bank"):
             pipeline.db.ensure_reference_value(field, row[field])
-        pipeline.save_rows_to_database([row])
+        saved, duplicates = pipeline.save_rows_to_database([row])
     except Exception:
         logger.error(
             "Error saving manual cashback for user %s",
@@ -585,7 +641,7 @@ async def save_manual_cashback(update, state, pipeline):
         return
     manual_states.pop(update.effective_user.id, None)
     await query.message.reply_text(
-        "✅ Категория добавлена.",
+        save_result_message(saved, duplicates),
         reply_markup=main_menu_keyboard(),
     )
 
@@ -790,6 +846,7 @@ async def begin_delete(
         )
         return
     manual_states.pop(update.effective_user.id, None)
+    card_states.pop(update.effective_user.id, None)
     edit_states.pop(update.effective_user.id, None)
     state = DeleteState(date, rows)
     delete_states[update.effective_user.id] = state
@@ -877,6 +934,299 @@ async def handle_delete_callback(update, context, pipeline):
     await select_delete_option(query.message, action, state)
 
 
+async def show_card_modes(message):
+    await message.reply_text(
+        "💳 Управление картами\nВыберите действие:",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "➕ Добавить карту", callback_data="cards:add"
+                    ),
+                    InlineKeyboardButton(
+                        "🗑 Удалить карту", callback_data="cards:delete"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Закрыть", callback_data="cards:cancel"
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+async def begin_cards(
+    update,
+    context,
+    pipeline,
+    allowed_users,
+    refuse_message,
+):
+    username = update.effective_user.username
+    if username not in allowed_users:
+        await update.effective_message.reply_text(refuse_message)
+        return
+    user_id = update.effective_user.id
+    manual_states.pop(user_id, None)
+    delete_states.pop(user_id, None)
+    edit_states.pop(user_id, None)
+    card_states[user_id] = CardState("choose")
+    await show_card_modes(update.effective_message)
+
+
+def card_people_options(state, pipeline, allowed_users):
+    if state.action == "delete":
+        return sorted({row["Person"] for _, row in state.rows})
+    people = set(allowed_users.values())
+    people.update(pipeline.db.get_reference_values("Person"))
+    return sorted(person for person in people if person)
+
+
+def card_bank_options(state, pipeline):
+    if state.action == "delete":
+        banks = {
+            row["Bank"]
+            for _, row in state.rows
+            if row["Person"] == state.person
+        }
+    else:
+        banks = set(pipeline.db.get_reference_values("Bank"))
+    return sorted(
+        (bank for bank in banks if bank),
+        key=lambda bank: (
+            BANK_ORDER.index(bank) if bank in BANK_ORDER else len(BANK_ORDER),
+            bank,
+        ),
+    )
+
+
+def card_record_options(state):
+    return sorted(
+        (
+            (row_number, row)
+            for row_number, row in state.rows
+            if row["Person"] == state.person and row["Bank"] == state.bank
+        ),
+        key=lambda item: (item[1]["Card"], item[0]),
+    )
+
+
+async def show_card_people(message, state, pipeline, allowed_users):
+    state.stage = "person"
+    state.options = card_people_options(state, pipeline, allowed_users)
+    await message.reply_text(
+        "Выберите пользователя:",
+        reply_markup=option_keyboard("cards:person", state.options, columns=2),
+    )
+
+
+async def show_card_banks(message, state, pipeline):
+    state.stage = "bank"
+    state.options = card_bank_options(state, pipeline)
+    await message.reply_text(
+        f"Пользователь: {state.person}\nВыберите банк:",
+        reply_markup=option_keyboard(
+            "cards:bank",
+            state.options,
+            columns=2,
+            back=True,
+            labels=[bank_label(value) for value in state.options],
+        ),
+    )
+
+
+async def ask_card_number(message, state):
+    state.stage = "number"
+    await message.reply_text(
+        f"{state.person} · {bank_label(state.bank)}\n"
+        "Напишите последние четыре цифры карты, например 1234.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад", callback_data="cards:back"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Отмена", callback_data="cards:cancel"
+                    ),
+                ]
+            ]
+        ),
+    )
+
+
+async def show_card_records(message, state):
+    state.stage = "card"
+    state.options = card_record_options(state)
+    await message.reply_text(
+        f"{state.person} · {bank_label(state.bank)}\n"
+        "Выберите карту для удаления:",
+        reply_markup=option_keyboard(
+            "cards:card",
+            state.options,
+            columns=2,
+            back=True,
+            labels=[f"Карта {row['Card']}" for _, row in state.options],
+        ),
+    )
+
+
+async def show_card_confirmation(message, state):
+    deleting = state.action == "delete"
+    state.stage = "confirm"
+    title = "Удалить эту карту?" if deleting else "Добавить эту карту?"
+    action = "🗑 Удалить" if deleting else "✅ Добавить"
+    await message.reply_text(
+        f"<b>{title}</b>\n\n"
+        f"👤 {html.escape(str(state.person))}\n"
+        f"{html.escape(bank_label(state.bank))}\n"
+        f"💳 •••• {html.escape(state.card)}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(action, callback_data="cards:confirm"),
+                    InlineKeyboardButton(
+                        "❌ Отмена", callback_data="cards:cancel"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="cards:back")],
+            ]
+        ),
+    )
+
+
+async def handle_card_text(update, state):
+    if state.stage != "number" or state.action != "add":
+        await update.effective_message.reply_text(
+            "В управлении картами используйте кнопки. "
+            "Номер вводится только на шаге добавления карты."
+        )
+        return
+    try:
+        state.card = parse_card_last4(update.effective_message.text)
+    except ValueError:
+        await update.effective_message.reply_text(
+            "Нужно ввести ровно четыре цифры, например 0123."
+        )
+        return
+    await show_card_confirmation(update.effective_message, state)
+
+
+async def confirm_card_action(message, user_id, state, pipeline):
+    try:
+        if state.action == "add":
+            created = pipeline.db.add_card(state.person, state.bank, state.card)
+            result = (
+                "✅ Карта добавлена."
+                if created
+                else "ℹ️ Такая карта уже добавлена."
+            )
+        else:
+            row_number, row = state.record
+            pipeline.db.delete_card(row_number, row)
+            result = "✅ Карта удалена."
+    except ValueError:
+        card_states.pop(user_id, None)
+        await message.reply_text(
+            "Запись карты уже изменилась. Начните заново.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    except Exception:
+        logger.error("Error updating cards for user %s", user_id)
+        await message.reply_text("Не удалось обновить карты.")
+        return
+    card_states.pop(user_id, None)
+    await message.reply_text(result, reply_markup=main_menu_keyboard())
+
+
+async def go_back_in_cards(message, state, pipeline, allowed_users):
+    if state.stage == "confirm":
+        if state.action == "add":
+            await ask_card_number(message, state)
+        else:
+            await show_card_records(message, state)
+    elif state.stage in ("number", "card"):
+        await show_card_banks(message, state, pipeline)
+    elif state.stage == "bank":
+        await show_card_people(message, state, pipeline, allowed_users)
+
+
+async def select_card_option(message, action, state, pipeline):
+    parts = action.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    stage, index_text = parts
+    index = int(index_text)
+    if stage != state.stage or index >= len(state.options):
+        await message.reply_text("Этот вариант уже неактуален.")
+        return
+    value = state.options[index]
+    if stage == "person":
+        state.person = value
+        await show_card_banks(message, state, pipeline)
+    elif stage == "bank":
+        state.bank = value
+        if state.action == "add":
+            await ask_card_number(message, state)
+        else:
+            await show_card_records(message, state)
+    elif stage == "card":
+        state.record = value
+        state.card = value[1]["Card"]
+        await show_card_confirmation(message, state)
+
+
+async def handle_cards_callback(
+    update,
+    context,
+    pipeline,
+    allowed_users,
+    refuse_message,
+):
+    query = update.callback_query
+    await query.answer()
+    username = update.effective_user.username
+    if username not in allowed_users:
+        await query.message.reply_text(refuse_message)
+        return
+    action = query.data.split(":", 1)[1]
+    user_id = update.effective_user.id
+    if action == "cancel":
+        card_states.pop(user_id, None)
+        await query.message.reply_text(
+            "Управление картами закрыто.", reply_markup=main_menu_keyboard()
+        )
+        return
+    if action in ("add", "delete"):
+        rows = (
+            pipeline.db.get_cards_with_indices() if action == "delete" else []
+        )
+        if action == "delete" and not rows:
+            await query.message.reply_text(
+                "Добавленных карт пока нет.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+        state = CardState(action, rows)
+        card_states[user_id] = state
+        await show_card_people(query.message, state, pipeline, allowed_users)
+        return
+    state = card_states.get(user_id)
+    if not state:
+        await query.message.reply_text("Сессия управления картами завершена.")
+        return
+    if action == "back":
+        await go_back_in_cards(query.message, state, pipeline, allowed_users)
+    elif action == "confirm":
+        await confirm_card_action(query.message, user_id, state, pipeline)
+    else:
+        await select_card_option(query.message, action, state, pipeline)
+
+
 def month_keyboard():
     buttons = [
         InlineKeyboardButton(
@@ -902,6 +1252,7 @@ async def choose_month(update, context, allowed_users, refuse_message):
     user_id = update.effective_user.id
     manual_states.pop(user_id, None)
     delete_states.pop(user_id, None)
+    card_states.pop(user_id, None)
     edit_states.pop(user_id, None)
     await update.effective_message.reply_text(
         f"Рабочий месяц: {selected_month_label(context)}\n"
@@ -937,6 +1288,7 @@ async def search_cashbacks(
         return
     month = selected_month(context)
     rows = pipeline.db.get_month_rows(month)
+    cards = pipeline.db.get_cards()
     matches = search_category_rows(rows, update.effective_message.text)
     if not matches:
         await update.effective_message.reply_text(
@@ -945,9 +1297,11 @@ async def search_cashbacks(
         return
     lines = [f"Найдено за {month[:7]}:"]
     for row in matches:
+        numbers = card_numbers(cards, row["Person"], row["Bank"])
         lines.append(
             f"• {row['Category']} — {row['Person']}, {bank_label(row['Bank'])}, "
-            f"{format_percent(row['Percent'])}"
+            f"{format_percent(row['Percent'])}\n"
+            f"  {format_cards_line(numbers)}"
         )
     await update.effective_message.reply_text("\n".join(lines))
 
@@ -968,6 +1322,10 @@ async def handle_text_message(
             "В режиме удаления используйте только кнопки. "
             "Для выхода нажмите «Отмена» или отправьте /cancel."
         )
+        return
+    card_state = card_states.get(update.effective_user.id)
+    if card_state:
+        await handle_card_text(update, card_state)
         return
     if await handle_manual_text(update, context, pipeline):
         return
@@ -1002,9 +1360,10 @@ async def list_cashbacks(
             await update.effective_message.reply_text(empty_message)
             return
 
+        cards = pipeline.db.get_cards()
         message = (
             f"Кэшбэки за {selected_month(context)[:7]}:\n\n"
-            f"{format_cashback_list(rows)}"
+            f"{format_cashback_list(rows, cards)}"
         )
         await update.effective_message.reply_text(
             message, reply_markup=main_menu_keyboard()
@@ -1037,6 +1396,14 @@ async def handle_menu_callback(
         )
     elif action == "delete":
         await begin_delete(
+            update,
+            context,
+            pipeline,
+            allowed_users,
+            refuse_message,
+        )
+    elif action == "cards":
+        await begin_cards(
             update,
             context,
             pipeline,
@@ -1105,6 +1472,7 @@ async def handle_image(
         # Store edit state
         manual_states.pop(update.effective_user.id, None)
         delete_states.pop(update.effective_user.id, None)
+        card_states.pop(update.effective_user.id, None)
         edit_states[update.effective_user.id] = EditState(
             rows, image_path, db_username
         )
@@ -1128,6 +1496,7 @@ async def configure_bot_commands(application):
             BotCommand("start", "Открыть меню"),
             BotCommand("add", "Добавить категорию вручную"),
             BotCommand("delete", "Удалить запись"),
+            BotCommand("cards", "Управление картами"),
             BotCommand("month", "Выбрать рабочий месяц"),
             BotCommand("list", "Показать кэшбэки выбранного месяца"),
             BotCommand("cancel", "Отменить текущее действие"),
@@ -1191,6 +1560,17 @@ def run_bot(cfg):
     )
     application.add_handler(
         CommandHandler(
+            "cards",
+            partial(
+                begin_cards,
+                pipeline=pipe,
+                allowed_users=allowed_users,
+                refuse_message=cfg["bot"]["messages"]["refuse_message"],
+            ),
+        )
+    )
+    application.add_handler(
+        CommandHandler(
             "month",
             partial(
                 choose_month,
@@ -1242,6 +1622,17 @@ def run_bot(cfg):
         CallbackQueryHandler(
             partial(handle_delete_callback, pipeline=pipe),
             pattern=r"^delete:",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            partial(
+                handle_cards_callback,
+                pipeline=pipe,
+                allowed_users=allowed_users,
+                refuse_message=cfg["bot"]["messages"]["refuse_message"],
+            ),
+            pattern=r"^cards:",
         )
     )
     application.add_handler(

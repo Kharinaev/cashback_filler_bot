@@ -6,6 +6,7 @@ from src.bot_helpers import (
     category_match_score,
     frequent_values,
     month_start,
+    parse_card_last4,
     parse_percent,
     search_category_rows,
 )
@@ -18,6 +19,17 @@ def test_canonical_bank_accepts_common_names():
     assert canonical_bank("Альфа Банк") == "Alfa"
     assert canonical_bank("озон") == "Ozon"
     assert canonical_bank("Новый банк") == "Новый банк"
+
+
+@pytest.mark.parametrize("raw", ["1234", "0123"])
+def test_parse_card_last4_preserves_four_digits(raw):
+    assert parse_card_last4(raw) == raw
+
+
+@pytest.mark.parametrize("raw", ["123", "12345", "12 34", "abcd"])
+def test_parse_card_last4_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_card_last4(raw)
 
 
 def test_category_match_handles_case_typo_and_substring():

@@ -3,6 +3,7 @@ db:
   spreadsheet_id: "YOUR_SPREADSHEET_ID_HERE"
   cashbacks_sheet: "Cashbacks"
   categories_sheet: "Categories"
+  cards_sheet: "Cards"
 
 vlm:
   api_token: "YOUR_VLM_API_TOKEN_HERE"
