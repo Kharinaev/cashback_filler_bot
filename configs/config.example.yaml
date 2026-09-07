@@ -23,6 +23,7 @@ bot:
       db_username: "YOUR_DB_USERNAME"
 
   images_path: "YOUR_IMAGES_PATH"
+  state_path: "data/bot_state.pkl"
 
   messages:
     start_message: "Welcome! Send a screenshot from your banking app for processing 📱"

@@ -6,6 +6,21 @@ from src.google_sheets_api import GoogleSheetsDB
 
 TARGET_ROWS = 10000
 REFERENCE_ROWS = 1000
+PALETTE = [
+    (0.85, 0.92, 1.00),
+    (0.89, 0.96, 0.86),
+    (1.00, 0.92, 0.82),
+    (0.96, 0.87, 0.94),
+    (0.89, 0.88, 1.00),
+    (1.00, 0.96, 0.76),
+    (0.84, 0.96, 0.95),
+    (0.96, 0.91, 0.84),
+]
+BANK_COLORS = {
+    "Tinkoff": (1.00, 0.93, 0.35),
+    "Alfa": (1.00, 0.80, 0.80),
+    "Ozon": (0.78, 0.88, 1.00),
+}
 
 
 def unique_strings(values):
@@ -129,6 +144,56 @@ def banding_request(sheet_id, row_count, column_count):
     }
 
 
+def color_rule(sheet_id, column_index, row_count, value, color, index=0):
+    red, green, blue = color
+    return {
+        "addConditionalFormatRule": {
+            "rule": {
+                "ranges": [
+                    {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": column_index,
+                        "endColumnIndex": column_index + 1,
+                    }
+                ],
+                "booleanRule": {
+                    "condition": {
+                        "type": "TEXT_EQ",
+                        "values": [{"userEnteredValue": str(value)}],
+                    },
+                    "format": {
+                        "backgroundColor": {
+                            "red": red,
+                            "green": green,
+                            "blue": blue,
+                        },
+                        "textFormat": {
+                            "foregroundColor": {
+                                "red": 0.10,
+                                "green": 0.10,
+                                "blue": 0.10,
+                            },
+                            "bold": True,
+                        },
+                    },
+                },
+            },
+            "index": index,
+        }
+    }
+
+
+def rule_targets_columns(rule, target_columns):
+    for cell_range in rule.get("ranges", []):
+        start = cell_range.get("startColumnIndex", 0)
+        end = cell_range.get("endColumnIndex", start + 1)
+        if any(start <= column < end for column in target_columns):
+            return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config.yaml")
@@ -189,7 +254,7 @@ def main():
             spreadsheetId=database.spreadsheet_id,
             fields=(
                 "sheets(properties(sheetId,title,gridProperties(rowCount)),"
-                "bandedRanges(bandedRangeId))"
+                "bandedRanges(bandedRangeId),conditionalFormats(ranges))"
             ),
         )
         .execute()
@@ -208,6 +273,21 @@ def main():
             requests.append(
                 {"deleteBanding": {"bandedRangeId": banding["bandedRangeId"]}}
             )
+    for sheet, target_columns in (
+        (cashbacks, {0, 2, 3}),
+        (dictionaries, {0, 1, 2}),
+    ):
+        rules = sheet.get("conditionalFormats", [])
+        for index in range(len(rules) - 1, -1, -1):
+            if rule_targets_columns(rules[index], target_columns):
+                requests.append(
+                    {
+                        "deleteConditionalFormatRule": {
+                            "sheetId": sheet["properties"]["sheetId"],
+                            "index": index,
+                        }
+                    }
+                )
     for sheet_id, row_count in (
         (cashbacks_id, TARGET_ROWS),
         (dictionaries_id, REFERENCE_ROWS),
@@ -279,6 +359,26 @@ def main():
         dimension_request(dictionaries_id, index, width)
         for index, width in enumerate([230, 140, 120])
     )
+    for index, category in enumerate(categories):
+        color = PALETTE[index % len(PALETTE)]
+        requests.append(
+            color_rule(cashbacks_id, 0, TARGET_ROWS, category, color)
+        )
+        requests.append(
+            color_rule(dictionaries_id, 0, REFERENCE_ROWS, category, color)
+        )
+    for index, person in enumerate(people):
+        color = PALETTE[(index + 2) % len(PALETTE)]
+        requests.append(color_rule(cashbacks_id, 3, TARGET_ROWS, person, color))
+        requests.append(
+            color_rule(dictionaries_id, 1, REFERENCE_ROWS, person, color)
+        )
+    for index, bank in enumerate(banks):
+        color = BANK_COLORS.get(bank, PALETTE[index % len(PALETTE)])
+        requests.append(color_rule(cashbacks_id, 2, TARGET_ROWS, bank, color))
+        requests.append(
+            color_rule(dictionaries_id, 2, REFERENCE_ROWS, bank, color)
+        )
 
     database.client.spreadsheets().batchUpdate(
         spreadsheetId=database.spreadsheet_id,

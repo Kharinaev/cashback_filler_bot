@@ -81,26 +81,63 @@ class GoogleSheetsDB:
             raise ValueError("Categories sheet has an unexpected header")
 
     def get_unique_categories(self):
-        values = self._get_values(self.categories_sheet, "A2:A")
-        categories = []
+        return self.get_reference_values("Category")
+
+    def get_reference_values(self, field):
+        columns = {"Category": "A", "Person": "B", "Bank": "C"}
+        if field not in columns:
+            raise ValueError(f"Unknown reference field: {field}")
+        column = columns[field]
+        values = self._get_values(
+            self.categories_sheet,
+            f"{column}2:{column}",
+        )
+        result = []
         seen = set()
         for row in values:
-            category = str(row[0]).strip() if row else ""
-            if category and category not in seen:
-                categories.append(category)
-                seen.add(category)
-        return categories
+            value = str(row[0]).strip() if row else ""
+            if value and value not in seen:
+                result.append(value)
+                seen.add(value)
+        return result
 
-    def get_current_month_rows(self):
-        month = datetime.now().strftime("%Y-%m")
+    def ensure_reference_value(self, field, value):
+        value = str(value).strip()
+        if not value or value in self.get_reference_values(field):
+            return
+        columns = {"Category": "A", "Person": "B", "Bank": "C"}
+        column = columns[field]
+        next_row = len(self.get_reference_values(field)) + 2
+        (
+            self.client.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=self.spreadsheet_id,
+                range=self._range(
+                    self.categories_sheet,
+                    f"{column}{next_row}",
+                ),
+                valueInputOption="RAW",
+                body={"values": [[value]]},
+            )
+            .execute()
+        )
+
+    def get_all_rows(self):
         values = self._get_values(self.cashbacks_sheet, "A2:G")
         rows = []
         for values_row in values:
             padded = values_row + [""] * (len(self.COLUMNS) - len(values_row))
-            row = dict(zip(self.COLUMNS, padded))
-            if str(row["Date"]).startswith(month):
-                rows.append(row)
+            rows.append(dict(zip(self.COLUMNS, padded)))
         return rows
+
+    def get_current_month_rows(self):
+        month = datetime.now().strftime("%Y-%m")
+        return [
+            row
+            for row in self.get_all_rows()
+            if str(row["Date"]).startswith(month)
+        ]
 
     def check_row_data(self, row_data):
         for field in self.required_fields:

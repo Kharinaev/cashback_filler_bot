@@ -31,13 +31,13 @@ class Pipeline:
 
         self.sampling_params = cfg["vlm"]["sampling_params"]
 
-    def __call__(self, image_path, person):
+    def __call__(self, image_path, person, date=None):
         unique_categories = self.db.get_unique_categories()
         logger.info(f"Unique categories: {unique_categories}")
         prompt = self.prompt_template.replace(
             "{CASHBACK_CATEGORIES}", str(unique_categories)
         )
-        date = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+        date = date or datetime.now().replace(day=1).strftime("%Y-%m-%d")
 
         resize_image(image_path, image_path)
         base64_image = encode_image(image_path)

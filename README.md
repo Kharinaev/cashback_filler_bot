@@ -6,6 +6,9 @@ cashbacks using Vision Language Models (VLM) and Google Sheets.
 ## Features
 
 - 📸 Process cashback screenshot automatically
+- ➕ Add cashback categories manually with guided Telegram buttons
+- 📅 Choose a fixed working month or return to the current month automatically
+- 🔎 Find similar categories in the current month from any text message
 - 🤖 VLM-powered transaction categorization
 - 📊 Integration with Google Sheets
 - 📱 Telegram interface
@@ -106,6 +109,9 @@ spreadsheet structure, run:
 ```bash
 python -m scripts.setup_google_sheet_ui --config configs/config.yaml
 ```
+
+The setup script also applies strict dropdowns and value colors for category,
+person, and bank columns. Percent and date formatting are left unchanged.
 
 ## Development
 
