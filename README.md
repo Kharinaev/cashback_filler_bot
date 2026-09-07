@@ -96,8 +96,16 @@ The `Cashbacks` sheet uses these columns in order:
 
 `Category | Percent | Bank | Person | Date | Limit, ₽ | Info`
 
-The `Categories` sheet contains a single `Category` column with the allowed
-cashback categories.
+The `Categories` sheet is the editable dropdown reference table:
+
+`Category | Person | Bank`
+
+To refresh dropdown validation and visual formatting after changing the
+spreadsheet structure, run:
+
+```bash
+python -m scripts.setup_google_sheet_ui --config configs/config.yaml
+```
 
 ## Development
 
