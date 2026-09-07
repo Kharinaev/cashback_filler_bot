@@ -1,16 +1,16 @@
+import html
 import logging
 import os
 from functools import partial
 
-import telegram
 from src.bot_helpers import (
+    canonical_bank,
     frequent_values,
     month_start,
     parse_percent,
     search_category_rows,
 )
 from src.pipe import Pipeline
-from tabulate import tabulate
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -52,17 +52,67 @@ class ManualAddState:
         self.options = []
 
 
+class DeleteState:
+    def __init__(self, date, rows):
+        self.date = date
+        self.rows = rows
+        self.stage = "person"
+        self.person = None
+        self.bank = None
+        self.record = None
+        self.options = []
+
+
 # Store edit states for each user
 edit_states = {}
 manual_states = {}
+delete_states = {}
+
+
+# Display name and color emoji for each bank.
+BANK_DISPLAY = {
+    "Tinkoff": ("ТБанк", "🟡"),
+    "Alfa": ("Альфа", "🔴"),
+    "Ozon": ("Ozon", "🔵"),
+}
+
+# Order in which banks are shown within a person's cashbacks.
+BANK_ORDER = ["Tinkoff", "Alfa", "Ozon"]
+
+
+def bank_label(bank):
+    name, emoji = BANK_DISPLAY.get(bank, (bank or "—", "⚪️"))
+    return f"{emoji} {name}"
+
+
+def format_percent(percent):
+    if percent in (None, ""):
+        return "—"
+    number = float(percent)
+    if number.is_integer():
+        return f"{int(number)}%"
+    return f"{number:g}%"
+
+
+def format_rows_preview(rows, title="Проверьте распознанные категории"):
+    lines = [f"<b>{html.escape(title)}</b>"]
+    for index, row in enumerate(rows, 1):
+        lines.extend(
+            [
+                "",
+                f"<b>{index}. {html.escape(str(row.get('Category') or '—'))}</b>"
+                f" — {html.escape(format_percent(row.get('Percent')))}",
+                f"{html.escape(bank_label(row.get('Bank')))}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def create_edit_keyboard(rows):
     keyboard = []
 
-    # Add "Edit Bank" button
     keyboard.append(
-        [InlineKeyboardButton("Edit Bank", callback_data="edit_bank")]
+        [InlineKeyboardButton("🏦 Изменить банк", callback_data="edit_bank")]
     )
 
     # Add row-specific edit buttons
@@ -71,10 +121,10 @@ def create_edit_keyboard(rows):
             [
                 [
                     InlineKeyboardButton(
-                        f"Edit Category {i}", callback_data=f"edit_category_{i}"
+                        f"✏️ Категория {i}", callback_data=f"edit_category_{i}"
                     ),
                     InlineKeyboardButton(
-                        f"Edit Percent {i}", callback_data=f"edit_percent_{i}"
+                        f"% Процент {i}", callback_data=f"edit_percent_{i}"
                     ),
                 ]
             ]
@@ -83,8 +133,8 @@ def create_edit_keyboard(rows):
     # Add confirm and cancel buttons
     keyboard.append(
         [
-            InlineKeyboardButton("✅ Confirm", callback_data="confirm_edit"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit"),
+            InlineKeyboardButton("✅ Сохранить", callback_data="confirm_edit"),
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel_edit"),
         ]
     )
 
@@ -105,15 +155,15 @@ async def handle_edit_callback(
         logger.warning(
             f"User @{username} (ID: {user_id}) tried to edit without active session"
         )
-        await query.message.reply_text(
-            "No active edit session. Please start over."
-        )
+        await query.message.reply_text("Сессия проверки уже завершена.")
         return
 
     if query.data == "edit_bank":
         logger.info(f"User @{username} (ID: {user_id}) started bank edit")
         state.current_edit = ("bank", None)
-        await query.message.reply_text("Please send the correct bank name.")
+        await query.message.reply_text(
+            "Напишите правильное название банка. Оно применится ко всем строкам."
+        )
 
     elif query.data.startswith("edit_category_"):
         row_idx = int(query.data.split("_")[2]) - 1
@@ -122,7 +172,7 @@ async def handle_edit_callback(
         )
         state.current_edit = ("category", row_idx)
         await query.message.reply_text(
-            f"Please send the correct category for row {row_idx + 1}."
+            f"Напишите правильную категорию для строки {row_idx + 1}."
         )
 
     elif query.data.startswith("edit_percent_"):
@@ -132,7 +182,7 @@ async def handle_edit_callback(
         )
         state.current_edit = ("percent", row_idx)
         await query.message.reply_text(
-            f"Please send the correct percentage for row {row_idx + 1}."
+            f"Напишите правильный процент для строки {row_idx + 1}."
         )
 
     elif query.data == "confirm_edit":
@@ -141,23 +191,33 @@ async def handle_edit_callback(
         pipeline = context.bot_data.get("pipeline")
         if pipeline:
             try:
+                for row in state.edited_rows:
+                    for field in ("Category", "Person", "Bank"):
+                        pipeline.db.ensure_reference_value(field, row[field])
                 pipeline.save_rows_to_database(state.edited_rows)
                 logger.info(
                     f"Successfully saved edited rows for user @{username} (ID: {user_id})"
                 )
-                await query.message.reply_text("✅ Changes saved successfully!")
-            except Exception as e:
+                await query.message.reply_text(
+                    "✅ Категории сохранены.",
+                    reply_markup=main_menu_keyboard(),
+                )
+            except Exception:
                 logger.error(
-                    f"Error saving changes for user @{username} (ID: {user_id}): {str(e)}"
+                    "Error saving changes for user @%s (ID: %s)",
+                    username,
+                    user_id,
                 )
                 await query.message.reply_text(
-                    f"❌ Error saving changes: {str(e)}"
+                    "❌ Не удалось сохранить изменения."
                 )
         del edit_states[user_id]
 
     elif query.data == "cancel_edit":
         logger.info(f"User @{username} (ID: {user_id}) cancelled edits")
-        await query.message.reply_text("❌ Edit cancelled.")
+        await query.message.reply_text(
+            "Проверка отменена.", reply_markup=main_menu_keyboard()
+        )
         del edit_states[user_id]
 
 
@@ -177,6 +237,7 @@ async def handle_edit_message(
     if edit_type == "bank":
         # Update bank for all rows
         old_value = state.edited_rows[0]["Bank"]
+        new_value = canonical_bank(new_value)
         for row in state.edited_rows:
             row["Bank"] = new_value
         logger.info(
@@ -191,40 +252,23 @@ async def handle_edit_message(
     elif edit_type == "percent":
         try:
             old_value = state.edited_rows[row_idx]["Percent"]
-            new_percent = float(new_value)
+            new_percent = parse_percent(new_value)
             state.edited_rows[row_idx]["Percent"] = new_percent
             logger.info(
                 f"User @{username} (ID: {user_id}) changed percent in row {row_idx + 1} from {old_value} to {new_percent}"
             )
-        except ValueError:
+        except (TypeError, ValueError):
             logger.warning(
                 f"User @{username} (ID: {user_id}) sent invalid percentage value: {new_value}"
             )
             await update.message.reply_text(
-                "Please send a valid number for the percentage."
+                "Процент должен быть числом от 0 до 100, например 1,5."
             )
             return
 
-    # Show updated table with enumeration
-    table_data = []
-    for i, row in enumerate(state.edited_rows, 1):
-        row_data = {
-            "#": i,
-            "Category": row["Category"],
-            "Percent": row["Percent"],
-            "Bank": row["Bank"],
-        }
-        table_data.append(row_data)
-
-    table = tabulate(
-        table_data,
-        headers="keys",
-        tablefmt="simple",
-    )
-
     await update.message.reply_text(
-        f"Updated table:\n```\n{table}\n```",
-        parse_mode=telegram.constants.ParseMode.MARKDOWN_V2,
+        format_rows_preview(state.edited_rows, "Обновлённый результат"),
+        parse_mode="HTML",
         reply_markup=create_edit_keyboard(state.edited_rows),
     )
 
@@ -240,9 +284,10 @@ def main_menu_keyboard():
                 InlineKeyboardButton("📋 Список", callback_data="menu:list"),
             ],
             [
+                InlineKeyboardButton("🗑 Удалить", callback_data="menu:delete"),
                 InlineKeyboardButton(
                     "📅 Выбрать месяц", callback_data="menu:month"
-                )
+                ),
             ],
         ]
     )
@@ -257,19 +302,42 @@ def selected_month_label(context):
     return value[:7] if value else f"{month_start()[:7]} (авто)"
 
 
-def option_keyboard(prefix, options, columns=2, cancel=True):
+def option_keyboard(
+    prefix,
+    options,
+    columns=2,
+    cancel=True,
+    back=False,
+    labels=None,
+):
     buttons = [
-        InlineKeyboardButton(str(option), callback_data=f"{prefix}:{index}")
+        InlineKeyboardButton(
+            str(labels[index] if labels else option),
+            callback_data=f"{prefix}:{index}",
+        )
         for index, option in enumerate(options)
     ]
     rows = [
         buttons[index : index + columns]
         for index in range(0, len(buttons), columns)
     ]
-    if cancel:
-        rows.append(
-            [InlineKeyboardButton("❌ Отмена", callback_data="manual:cancel")]
+    controls = []
+    if back:
+        controls.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"{prefix.split(':')[0]}:back",
+            )
         )
+    if cancel:
+        controls.append(
+            InlineKeyboardButton(
+                "❌ Отмена",
+                callback_data=f"{prefix.split(':')[0]}:cancel",
+            )
+        )
+    if controls:
+        rows.append(controls)
     return InlineKeyboardMarkup(rows)
 
 
@@ -282,8 +350,14 @@ async def start(
 ) -> None:
     username = update.effective_user.username
     if username in allowed_users:
+        user_id = update.effective_user.id
+        manual_states.pop(user_id, None)
+        delete_states.pop(user_id, None)
+        edit_states.pop(user_id, None)
         await update.effective_message.reply_text(
-            start_message,
+            f"{start_message}\n\n"
+            f"Рабочий месяц: {selected_month_label(context)}.\n"
+            "Для поиска просто напишите название категории.",
             reply_markup=main_menu_keyboard(),
         )
         logger.info(f"Start command for user @{username}")
@@ -292,23 +366,21 @@ async def start(
         logger.info(f"Refused to user @{username}")
 
 
-# Display name and color emoji for each bank
-BANK_DISPLAY = {
-    "Tinkoff": ("ТБанк", "🟡"),
-    "Alfa": ("Альфа", "🔴"),
-    "Ozon": ("Ozon", "🔵"),
-}
-
-# Order in which banks are shown within a person's cashbacks
-BANK_ORDER = ["Tinkoff", "Alfa", "Ozon"]
-
-
-def format_percent(percent):
-    if percent in (None, ""):
-        return ""
-    if float(percent).is_integer():
-        return f"{int(percent)}%"
-    return f"{percent}%"
+async def cancel_workflow(update, context):
+    user_id = update.effective_user.id
+    had_state = any(
+        user_id in states
+        for states in (manual_states, delete_states, edit_states)
+    )
+    manual_states.pop(user_id, None)
+    delete_states.pop(user_id, None)
+    edit_states.pop(user_id, None)
+    message = (
+        "Текущее действие отменено." if had_state else "Активных действий нет."
+    )
+    await update.effective_message.reply_text(
+        message, reply_markup=main_menu_keyboard()
+    )
 
 
 def format_cashback_list(rows):
@@ -327,12 +399,11 @@ def format_cashback_list(rows):
 
     blocks = []
     for (person, bank), group in sorted(groups.items(), key=sort_key):
-        bank_name, emoji = BANK_DISPLAY.get(bank, (bank or "—", ""))
-        header = f"{person or '—'} {bank_name} {emoji}".rstrip()
+        header = f"👤 {person or '—'} · {bank_label(bank)}"
         lines = [header]
         for i, row in enumerate(group, 1):
             category = row["Category"] or "—"
-            lines.append(f"{i}. {category} {format_percent(row['Percent'])}")
+            lines.append(f"{i}. {category} — {format_percent(row['Percent'])}")
         blocks.append("\n".join(lines))
 
     return "\n\n".join(blocks)
@@ -367,11 +438,17 @@ async def begin_manual_add(
         date=selected_month(context),
     )
     state.options = pipeline.db.get_reference_values("Bank")
+    delete_states.pop(update.effective_user.id, None)
+    edit_states.pop(update.effective_user.id, None)
     manual_states[update.effective_user.id] = state
     await update.effective_message.reply_text(
         f"Выберите банк или напишите его название.\n"
         f"Месяц записи: {state.date[:7]}",
-        reply_markup=option_keyboard("manual:bank", state.options),
+        reply_markup=option_keyboard(
+            "manual:bank",
+            state.options,
+            labels=[bank_label(value) for value in state.options],
+        ),
     )
 
 
@@ -401,7 +478,7 @@ def percent_options(pipeline, state):
 
 
 async def set_manual_bank(update, state, value, pipeline):
-    state.bank = str(value).strip()
+    state.bank = canonical_bank(value)
     if not state.bank:
         await update.effective_message.reply_text("Название банка пустое.")
         return
@@ -409,7 +486,9 @@ async def set_manual_bank(update, state, value, pipeline):
     state.options = category_options(pipeline, state)
     await update.effective_message.reply_text(
         "Выберите частую категорию или напишите свою:",
-        reply_markup=option_keyboard("manual:category", state.options),
+        reply_markup=option_keyboard(
+            "manual:category", state.options, back=True
+        ),
     )
 
 
@@ -426,6 +505,7 @@ async def set_manual_category(update, state, value, pipeline):
             "manual:percent",
             state.options,
             columns=4,
+            back=True,
         ),
     )
 
@@ -435,14 +515,14 @@ async def set_manual_percent(update, state, value):
         state.percent = parse_percent(value)
     except (TypeError, ValueError):
         await update.effective_message.reply_text(
-            "Не поняла процент. Напишите число от 0 до 100, например 1,5."
+            "Процент не распознан. Напишите число от 0 до 100, например 1,5."
         )
         return
     state.stage = "confirm"
     await update.effective_message.reply_text(
         "Проверьте запись:\n"
         f"• пользователь: {state.person}\n"
-        f"• банк: {state.bank}\n"
+        f"• банк: {bank_label(state.bank)}\n"
         f"• категория: {state.category}\n"
         f"• процент: {format_percent(state.percent)}\n"
         f"• месяц: {state.date[:7]}",
@@ -455,7 +535,8 @@ async def set_manual_percent(update, state, value):
                     InlineKeyboardButton(
                         "❌ Отмена", callback_data="manual:cancel"
                     ),
-                ]
+                ],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="manual:back")],
             ]
         ),
     )
@@ -495,11 +576,10 @@ async def save_manual_cashback(update, state, pipeline):
         for field in ("Category", "Person", "Bank"):
             pipeline.db.ensure_reference_value(field, row[field])
         pipeline.save_rows_to_database([row])
-    except Exception as error:
+    except Exception:
         logger.error(
-            "Error saving manual cashback for user %s: %s",
+            "Error saving manual cashback for user %s",
             update.effective_user.id,
-            error,
         )
         await query.message.reply_text("Не удалось сохранить запись.")
         return
@@ -544,10 +624,257 @@ async def handle_manual_callback(update, context, pipeline):
     if not state:
         await query.message.reply_text("Сессия добавления уже завершена.")
         return
+    if action == "back":
+        if state.stage == "confirm":
+            state.stage = "percent"
+            state.options = percent_options(pipeline, state)
+            await query.message.reply_text(
+                "Выберите процент или напишите число:",
+                reply_markup=option_keyboard(
+                    "manual:percent",
+                    state.options,
+                    columns=4,
+                    back=True,
+                ),
+            )
+        elif state.stage == "percent":
+            state.stage = "category"
+            state.options = category_options(pipeline, state)
+            await query.message.reply_text(
+                "Выберите категорию или напишите свою:",
+                reply_markup=option_keyboard(
+                    "manual:category", state.options, back=True
+                ),
+            )
+        elif state.stage == "category":
+            state.stage = "bank"
+            state.options = pipeline.db.get_reference_values("Bank")
+            await query.message.reply_text(
+                "Выберите банк или напишите его название:",
+                reply_markup=option_keyboard(
+                    "manual:bank",
+                    state.options,
+                    labels=[bank_label(value) for value in state.options],
+                ),
+            )
+        return
     if action == "save":
         await save_manual_cashback(update, state, pipeline)
         return
     await select_manual_option(update, state, action, pipeline)
+
+
+def delete_people(state):
+    return sorted({row["Person"] for _, row in state.rows if row["Person"]})
+
+
+def delete_banks(state):
+    banks = {
+        row["Bank"]
+        for _, row in state.rows
+        if row["Person"] == state.person and row["Bank"]
+    }
+    return sorted(
+        banks,
+        key=lambda bank: (
+            BANK_ORDER.index(bank) if bank in BANK_ORDER else len(BANK_ORDER),
+            bank,
+        ),
+    )
+
+
+def delete_records(state):
+    rows = [
+        (row_number, row)
+        for row_number, row in state.rows
+        if row["Person"] == state.person and row["Bank"] == state.bank
+    ]
+    return sorted(
+        rows,
+        key=lambda item: (
+            str(item[1].get("Category", "")),
+            float(item[1].get("Percent") or 0),
+            item[0],
+        ),
+    )
+
+
+async def show_delete_people(message, state):
+    state.stage = "person"
+    state.options = delete_people(state)
+    await message.reply_text(
+        f"🗑 Удаление записи · месяц {state.date[:7]}\n"
+        "Выберите пользователя:",
+        reply_markup=option_keyboard("delete:person", state.options, columns=2),
+    )
+
+
+async def show_delete_banks(message, state):
+    state.stage = "bank"
+    state.options = delete_banks(state)
+    await message.reply_text(
+        f"Пользователь: {state.person}\nВыберите банк:",
+        reply_markup=option_keyboard(
+            "delete:bank",
+            state.options,
+            columns=2,
+            back=True,
+            labels=[bank_label(value) for value in state.options],
+        ),
+    )
+
+
+async def show_delete_records(message, state):
+    state.stage = "record"
+    state.options = delete_records(state)
+    labels = [
+        f"{row['Category']} · {format_percent(row['Percent'])}"
+        for _, row in state.options
+    ]
+    await message.reply_text(
+        f"{state.person} · {bank_label(state.bank)}\n"
+        "Выберите запись для удаления:",
+        reply_markup=option_keyboard(
+            "delete:record",
+            state.options,
+            columns=1,
+            back=True,
+            labels=labels,
+        ),
+    )
+
+
+async def show_delete_confirmation(message, state):
+    _, row = state.record
+    state.stage = "confirm"
+    await message.reply_text(
+        "<b>Удалить эту запись?</b>\n\n"
+        f"👤 {html.escape(str(row['Person']))}\n"
+        f"{html.escape(bank_label(row['Bank']))}\n"
+        f"🏷 {html.escape(str(row['Category']))}\n"
+        f"💳 {html.escape(format_percent(row['Percent']))}\n"
+        f"📅 {html.escape(str(row['Date'])[:7])}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🗑 Удалить", callback_data="delete:confirm"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Отмена", callback_data="delete:cancel"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="delete:back")],
+            ]
+        ),
+    )
+
+
+async def begin_delete(
+    update,
+    context,
+    pipeline,
+    allowed_users,
+    refuse_message,
+):
+    username = update.effective_user.username
+    if username not in allowed_users:
+        await update.effective_message.reply_text(refuse_message)
+        return
+    date = selected_month(context)
+    rows = pipeline.db.get_month_rows_with_indices(date)
+    if not rows:
+        await update.effective_message.reply_text(
+            f"За {date[:7]} записей нет.", reply_markup=main_menu_keyboard()
+        )
+        return
+    manual_states.pop(update.effective_user.id, None)
+    edit_states.pop(update.effective_user.id, None)
+    state = DeleteState(date, rows)
+    delete_states[update.effective_user.id] = state
+    await show_delete_people(update.effective_message, state)
+
+
+async def go_back_in_delete(message, state):
+    if state.stage == "confirm":
+        await show_delete_records(message, state)
+    elif state.stage == "record":
+        await show_delete_banks(message, state)
+    elif state.stage == "bank":
+        await show_delete_people(message, state)
+
+
+async def confirm_delete(message, user_id, state, pipeline):
+    if state.stage != "confirm" or not state.record:
+        await message.reply_text("Сначала выберите запись.")
+        return
+    row_number, row = state.record
+    try:
+        pipeline.db.delete_row(row_number, row)
+    except ValueError:
+        logger.warning(
+            "Cashback row changed before deletion for user %s", user_id
+        )
+        delete_states.pop(user_id, None)
+        await message.reply_text(
+            "Запись уже изменилась или была удалена. Начните удаление заново.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    except Exception:
+        logger.error("Error deleting cashback for user %s", user_id)
+        await message.reply_text("Не удалось удалить запись.")
+        return
+    delete_states.pop(user_id, None)
+    await message.reply_text(
+        "✅ Запись удалена.", reply_markup=main_menu_keyboard()
+    )
+
+
+async def select_delete_option(message, action, state):
+    parts = action.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        return
+    stage, index_text = parts
+    index = int(index_text)
+    if stage != state.stage or index >= len(state.options):
+        await message.reply_text("Этот вариант уже неактуален.")
+        return
+    value = state.options[index]
+    if stage == "person":
+        state.person = value
+        await show_delete_banks(message, state)
+    elif stage == "bank":
+        state.bank = value
+        await show_delete_records(message, state)
+    elif stage == "record":
+        state.record = value
+        await show_delete_confirmation(message, state)
+
+
+async def handle_delete_callback(update, context, pipeline):
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    user_id = update.effective_user.id
+    if action == "cancel":
+        delete_states.pop(user_id, None)
+        await query.message.reply_text(
+            "Удаление отменено.", reply_markup=main_menu_keyboard()
+        )
+        return
+    state = delete_states.get(user_id)
+    if not state:
+        await query.message.reply_text("Сессия удаления уже завершена.")
+        return
+    if action == "back":
+        await go_back_in_delete(query.message, state)
+        return
+    if action == "confirm":
+        await confirm_delete(query.message, user_id, state, pipeline)
+        return
+    await select_delete_option(query.message, action, state)
 
 
 def month_keyboard():
@@ -572,9 +899,13 @@ async def choose_month(update, context, allowed_users, refuse_message):
     if username not in allowed_users:
         await update.effective_message.reply_text(refuse_message)
         return
+    user_id = update.effective_user.id
+    manual_states.pop(user_id, None)
+    delete_states.pop(user_id, None)
+    edit_states.pop(user_id, None)
     await update.effective_message.reply_text(
         f"Рабочий месяц: {selected_month_label(context)}\n"
-        "Он будет использоваться для фото и ручных записей.",
+        "Он используется для фото, ручных записей, списка, поиска и удаления.",
         reply_markup=month_keyboard(),
     )
 
@@ -595,6 +926,7 @@ async def handle_month_callback(update, context):
 
 async def search_cashbacks(
     update,
+    context,
     pipeline,
     allowed_users,
     refuse_message,
@@ -603,17 +935,18 @@ async def search_cashbacks(
     if username not in allowed_users:
         await update.effective_message.reply_text(refuse_message)
         return
-    rows = pipeline.db.get_current_month_rows()
+    month = selected_month(context)
+    rows = pipeline.db.get_month_rows(month)
     matches = search_category_rows(rows, update.effective_message.text)
     if not matches:
         await update.effective_message.reply_text(
-            "В текущем месяце похожих категорий не нашла."
+            f"За {month[:7]} похожих категорий не найдено."
         )
         return
-    lines = ["Нашла в текущем месяце:"]
+    lines = [f"Найдено за {month[:7]}:"]
     for row in matches:
         lines.append(
-            f"• {row['Category']} — {row['Person']}, {row['Bank']}, "
+            f"• {row['Category']} — {row['Person']}, {bank_label(row['Bank'])}, "
             f"{format_percent(row['Percent'])}"
         )
     await update.effective_message.reply_text("\n".join(lines))
@@ -630,10 +963,17 @@ async def handle_text_message(
     if edit_state and edit_state.current_edit:
         await handle_edit_message(update, context)
         return
+    if update.effective_user.id in delete_states:
+        await update.effective_message.reply_text(
+            "В режиме удаления используйте только кнопки. "
+            "Для выхода нажмите «Отмена» или отправьте /cancel."
+        )
+        return
     if await handle_manual_text(update, context, pipeline):
         return
     await search_cashbacks(
         update,
+        context,
         pipeline,
         allowed_users,
         refuse_message,
@@ -645,8 +985,8 @@ async def list_cashbacks(
     context: ContextTypes.DEFAULT_TYPE,
     pipeline,
     refuse_message: str = "",
-    empty_message: str = "No cashbacks found.",
-    not_ok_message: str = "not_ok",
+    empty_message: str = "На выбранный месяц кэшбэков пока нет 🤷",
+    not_ok_message: str = "Не удалось загрузить список.",
     allowed_users: dict = {},
 ) -> None:
     username = update.effective_user.username
@@ -657,16 +997,21 @@ async def list_cashbacks(
 
     logger.info(f"List command for user @{username}")
     try:
-        rows = pipeline.db.get_current_month_rows()
+        rows = pipeline.db.get_month_rows(selected_month(context))
         if not rows:
             await update.effective_message.reply_text(empty_message)
             return
 
-        message = format_cashback_list(rows)
-        await update.effective_message.reply_text(message)
+        message = (
+            f"Кэшбэки за {selected_month(context)[:7]}:\n\n"
+            f"{format_cashback_list(rows)}"
+        )
+        await update.effective_message.reply_text(
+            message, reply_markup=main_menu_keyboard()
+        )
         logger.info(f"Sent cashback list to user @{username}")
-    except Exception as e:
-        logger.error(f"Error building cashback list for @{username} - {e}")
+    except Exception:
+        logger.error("Error building cashback list for @%s", username)
         await update.effective_message.reply_text(not_ok_message)
 
 
@@ -684,6 +1029,14 @@ async def handle_menu_callback(
     action = query.data.split(":", 1)[1]
     if action == "add":
         await begin_manual_add(
+            update,
+            context,
+            pipeline,
+            allowed_users,
+            refuse_message,
+        )
+    elif action == "delete":
+        await begin_delete(
             update,
             context,
             pipeline,
@@ -710,10 +1063,10 @@ async def handle_image(
     pipeline,
     images_path: str,
     refuse_message: str = "",
-    processing_message: str = "processing",
-    ok_message: str = "ok",
-    continue_message: str = "continue",
-    not_ok_message: str = "not_ok",
+    processing_message: str = "Скриншот обрабатывается… 🔄",
+    ok_message: str = "Категории распознаны.",
+    continue_message: str = "Можно отправить следующий скриншот 📨",
+    not_ok_message: str = "Не удалось обработать скриншот.",
     allowed_users: dict = {},
 ) -> None:
     username = update.effective_user.username
@@ -742,41 +1095,30 @@ async def handle_image(
         # Store pipeline in bot_data for access in handlers
         context.bot_data["pipeline"] = pipeline
 
-        # Create table with enumeration
-        table_data = []
-        for i, row in enumerate(rows, 1):
-            row_data = {
-                "#": i,
-                "Category": row["Category"],
-                "Percent": row["Percent"],
-                "Bank": row["Bank"],
-            }
-            table_data.append(row_data)
-
-        table = tabulate(
-            table_data,
-            headers="keys",
-            tablefmt="simple",
-        )
-        await update.message.reply_text(ok_message)
+        if not rows:
+            await update.message.reply_text(
+                "На скриншоте категории не распознаны. "
+                "Попробуйте отправить более чёткое изображение."
+            )
+            return
 
         # Store edit state
+        manual_states.pop(update.effective_user.id, None)
+        delete_states.pop(update.effective_user.id, None)
         edit_states[update.effective_user.id] = EditState(
             rows, image_path, db_username
         )
 
-        # Send table with edit buttons
         await update.message.reply_text(
-            f"```\n{table}\n```",
-            parse_mode=telegram.constants.ParseMode.MARKDOWN_V2,
+            format_rows_preview(rows),
+            parse_mode="HTML",
             reply_markup=create_edit_keyboard(rows),
         )
 
         logger.info(f"Processed image {image_path}")
-        await update.message.reply_text(continue_message)
 
-    except Exception as e:
-        logger.error(f"Error during processing of {image_path} - {e}")
+    except Exception:
+        logger.error("Error during processing of %s", image_path)
         await update.message.reply_text(not_ok_message)
 
 
@@ -785,8 +1127,10 @@ async def configure_bot_commands(application):
         [
             BotCommand("start", "Открыть меню"),
             BotCommand("add", "Добавить категорию вручную"),
+            BotCommand("delete", "Удалить запись"),
             BotCommand("month", "Выбрать рабочий месяц"),
-            BotCommand("list", "Показать кэшбэки текущего месяца"),
+            BotCommand("list", "Показать кэшбэки выбранного месяца"),
+            BotCommand("cancel", "Отменить текущее действие"),
         ]
     )
 
@@ -836,6 +1180,17 @@ def run_bot(cfg):
     )
     application.add_handler(
         CommandHandler(
+            "delete",
+            partial(
+                begin_delete,
+                pipeline=pipe,
+                allowed_users=allowed_users,
+                refuse_message=cfg["bot"]["messages"]["refuse_message"],
+            ),
+        )
+    )
+    application.add_handler(
+        CommandHandler(
             "month",
             partial(
                 choose_month,
@@ -868,17 +1223,25 @@ def run_bot(cfg):
                 pipeline=pipe,
                 refuse_message=cfg["bot"]["messages"]["refuse_message"],
                 empty_message=cfg["bot"]["messages"].get(
-                    "empty_list_message", "На этот месяц кэшбэков пока нет 🤷"
+                    "empty_list_message",
+                    "На выбранный месяц кэшбэков пока нет 🤷",
                 ),
                 not_ok_message=cfg["bot"]["messages"]["not_ok_message"],
                 allowed_users=allowed_users,
             ),
         )
     )
+    application.add_handler(CommandHandler("cancel", cancel_workflow))
     application.add_handler(
         CallbackQueryHandler(
             partial(handle_manual_callback, pipeline=pipe),
             pattern=r"^manual:",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            partial(handle_delete_callback, pipeline=pipe),
+            pattern=r"^delete:",
         )
     )
     application.add_handler(
@@ -893,7 +1256,7 @@ def run_bot(cfg):
                 refuse_message=cfg["bot"]["messages"]["refuse_message"],
                 empty_message=cfg["bot"]["messages"].get(
                     "empty_list_message",
-                    "На этот месяц кэшбэков пока нет 🤷",
+                    "На выбранный месяц кэшбэков пока нет 🤷",
                 ),
                 not_ok_message=cfg["bot"]["messages"]["not_ok_message"],
             ),

@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 from src.bot_helpers import (
+    canonical_bank,
     category_match_score,
     frequent_values,
     month_start,
@@ -9,6 +10,14 @@ from src.bot_helpers import (
     search_category_rows,
 )
 from src.sheet_colors import value_color
+
+
+def test_canonical_bank_accepts_common_names():
+    assert canonical_bank("Т-Банк") == "Tinkoff"
+    assert canonical_bank("тиньк") == "Tinkoff"
+    assert canonical_bank("Альфа Банк") == "Alfa"
+    assert canonical_bank("озон") == "Ozon"
+    assert canonical_bank("Новый банк") == "Новый банк"
 
 
 def test_category_match_handles_case_typo_and_substring():

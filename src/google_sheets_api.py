@@ -164,20 +164,89 @@ class GoogleSheetsDB:
         ).execute()
 
     def get_all_rows(self):
+        return [row for _, row in self.get_all_rows_with_indices()]
+
+    def get_all_rows_with_indices(self):
         values = self._get_values(self.cashbacks_sheet, "A2:G")
         rows = []
-        for values_row in values:
+        for row_number, values_row in enumerate(values, start=2):
             padded = values_row + [""] * (len(self.COLUMNS) - len(values_row))
-            rows.append(dict(zip(self.COLUMNS, padded)))
+            rows.append((row_number, dict(zip(self.COLUMNS, padded))))
         return rows
 
-    def get_current_month_rows(self):
-        month = datetime.now().strftime("%Y-%m")
+    def get_month_rows(self, month):
+        month_prefix = str(month)[:7]
         return [
             row
             for row in self.get_all_rows()
-            if str(row["Date"]).startswith(month)
+            if str(row["Date"]).startswith(month_prefix)
         ]
+
+    def get_month_rows_with_indices(self, month):
+        month_prefix = str(month)[:7]
+        return [
+            (row_number, row)
+            for row_number, row in self.get_all_rows_with_indices()
+            if str(row["Date"]).startswith(month_prefix)
+        ]
+
+    def get_current_month_rows(self):
+        return self.get_month_rows(datetime.now().strftime("%Y-%m"))
+
+    @staticmethod
+    def _comparable_value(value):
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
+    def delete_row(self, row_number, expected_row):
+        current = self._get_values(
+            self.cashbacks_sheet,
+            f"A{row_number}:G{row_number}",
+        )
+        if not current:
+            raise ValueError("The selected row no longer exists")
+        actual = current[0] + [""] * (len(self.COLUMNS) - len(current[0]))
+        expected = self._serialize_row(expected_row)
+        if [self._comparable_value(value) for value in actual] != [
+            self._comparable_value(value) for value in expected
+        ]:
+            raise ValueError("The selected row changed")
+
+        metadata = (
+            self.client.spreadsheets()
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                fields="sheets.properties(sheetId,title)",
+            )
+            .execute()
+        )
+        sheet_id = next(
+            sheet["properties"]["sheetId"]
+            for sheet in metadata["sheets"]
+            if sheet["properties"]["title"] == self.cashbacks_sheet
+        )
+        return (
+            self.client.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": row_number - 1,
+                                    "endIndex": row_number,
+                                }
+                            }
+                        }
+                    ]
+                },
+            )
+            .execute()
+        )
 
     def check_row_data(self, row_data):
         for field in self.required_fields:

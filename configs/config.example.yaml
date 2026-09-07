@@ -26,10 +26,10 @@ bot:
   state_path: "data/bot_state.pkl"
 
   messages:
-    start_message: "Welcome! Send a screenshot from your banking app for processing 📱"
-    refuse_message: "Sorry, I cannot communicate with you."
-    processing_message: "Processing... 🔄"
-    ok_message: "Added these categories:"
-    continue_message: "You can send another screenshot 📨"
-    not_ok_message: "Something went wrong, please try again. Contact support if the issue persists."
-    empty_list_message: "No cashbacks found for this month 🤷"
+    start_message: "Выберите действие или отправьте скриншот с категориями кэшбэка 📱"
+    refuse_message: "Для этого аккаунта доступ к боту не настроен."
+    processing_message: "Скриншот обрабатывается… 🔄"
+    ok_message: "Категории распознаны."
+    continue_message: "Можно отправить следующий скриншот 📨"
+    not_ok_message: "Не удалось обработать запрос. Попробуйте ещё раз."
+    empty_list_message: "На выбранный месяц кэшбэков пока нет 🤷"

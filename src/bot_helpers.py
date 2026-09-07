@@ -9,6 +9,26 @@ def normalize_text(value):
     return " ".join(re.findall(r"[a-zа-я0-9]+", text))
 
 
+def canonical_bank(value):
+    original = str(value or "").strip()
+    normalized = normalize_text(original).replace(" ", "")
+    aliases = {
+        "tinkoff": "Tinkoff",
+        "тинькофф": "Tinkoff",
+        "тиньк": "Tinkoff",
+        "тбанк": "Tinkoff",
+        "тб": "Tinkoff",
+        "alfa": "Alfa",
+        "alpha": "Alfa",
+        "альфа": "Alfa",
+        "альфабанк": "Alfa",
+        "ozon": "Ozon",
+        "озон": "Ozon",
+        "озонбанк": "Ozon",
+    }
+    return aliases.get(normalized, original)
+
+
 def category_match_score(query, category):
     query = normalize_text(query)
     category = normalize_text(category)
