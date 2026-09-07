@@ -3,6 +3,7 @@ from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from src.sheet_colors import conditional_color_rule, value_color
 
 
 class GoogleSheetsDB:
@@ -103,11 +104,12 @@ class GoogleSheetsDB:
 
     def ensure_reference_value(self, field, value):
         value = str(value).strip()
-        if not value or value in self.get_reference_values(field):
+        existing = self.get_reference_values(field)
+        if not value or value in existing:
             return
         columns = {"Category": "A", "Person": "B", "Bank": "C"}
         column = columns[field]
-        next_row = len(self.get_reference_values(field)) + 2
+        next_row = len(existing) + 2
         (
             self.client.spreadsheets()
             .values()
@@ -122,6 +124,44 @@ class GoogleSheetsDB:
             )
             .execute()
         )
+        self._add_reference_color(field, value)
+
+    def _add_reference_color(self, field, value):
+        target_columns = {"Category": 0, "Person": 3, "Bank": 2}
+        reference_columns = {"Category": 0, "Person": 1, "Bank": 2}
+        metadata = (
+            self.client.spreadsheets()
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                fields="sheets.properties(sheetId,title)",
+            )
+            .execute()
+        )
+        sheet_ids = {
+            sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+            for sheet in metadata["sheets"]
+        }
+        color = value_color(field, value)
+        requests = [
+            conditional_color_rule(
+                sheet_ids[self.cashbacks_sheet],
+                target_columns[field],
+                10000,
+                value,
+                color,
+            ),
+            conditional_color_rule(
+                sheet_ids[self.categories_sheet],
+                reference_columns[field],
+                1000,
+                value,
+                color,
+            ),
+        ]
+        self.client.spreadsheets().batchUpdate(
+            spreadsheetId=self.spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
 
     def get_all_rows(self):
         values = self._get_values(self.cashbacks_sheet, "A2:G")

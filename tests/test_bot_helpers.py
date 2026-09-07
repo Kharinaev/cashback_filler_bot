@@ -8,6 +8,7 @@ from src.bot_helpers import (
     parse_percent,
     search_category_rows,
 )
+from src.sheet_colors import value_color
 
 
 def test_category_match_handles_case_typo_and_substring():
@@ -58,3 +59,8 @@ def test_month_start_handles_year_boundary():
     now = datetime(2026, 1, 15)
     assert month_start(0, now) == "2026-01-01"
     assert month_start(-1, now) == "2025-12-01"
+
+
+def test_colors_are_stable_and_banks_have_distinct_colors():
+    assert value_color("Category", "Такси") == value_color("Category", "Такси")
+    assert value_color("Bank", "Tinkoff") != value_color("Bank", "Alfa")
