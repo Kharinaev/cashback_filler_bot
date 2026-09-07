@@ -169,6 +169,7 @@ run_test.py
 notebooks/*
 configs/config*.yaml
 !configs/config.example.yaml
+configs/*.json
 archive/*
 data/*
 outputs/*

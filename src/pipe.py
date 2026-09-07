@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 
-from src.notion_api import NotionDB
+from src.google_sheets_api import GoogleSheetsDB
 from src.tools import encode_image, process_response, resize_image
 from src.vlm import VLM
 
@@ -13,8 +13,11 @@ class Pipeline:
     def __init__(self, cfg):
         self.cfg = cfg
 
-        self.notion = NotionDB(
-            notion_api=cfg["db"]["api_key"], db_id=cfg["db"]["db_id"]
+        self.db = GoogleSheetsDB(
+            credentials_file=cfg["db"]["credentials_file"],
+            spreadsheet_id=cfg["db"]["spreadsheet_id"],
+            cashbacks_sheet=cfg["db"].get("cashbacks_sheet", "Cashbacks"),
+            categories_sheet=cfg["db"].get("categories_sheet", "Categories"),
         )
 
         self.vlm = VLM(
@@ -29,7 +32,7 @@ class Pipeline:
         self.sampling_params = cfg["vlm"]["sampling_params"]
 
     def __call__(self, image_path, person):
-        unique_categories = self.notion.get_unique_categories()
+        unique_categories = self.db.get_unique_categories()
         logger.info(f"Unique categories: {unique_categories}")
         prompt = self.prompt_template.replace(
             "{CASHBACK_CATEGORIES}", str(unique_categories)
@@ -56,7 +59,7 @@ class Pipeline:
         return rows
 
     def save_rows_to_database(self, rows):
-        """Save processed rows to Notion database"""
+        """Save processed rows to Google Sheets."""
         for row in rows:
-            self.notion.add_row_to_database(row)
-        logger.info("Rows added to Notion")
+            self.db.add_row_to_database(row)
+        logger.info("Rows added to Google Sheets")

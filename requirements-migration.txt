@@ -1,0 +1,2 @@
+-r requirements.txt
+notion-client>=2.0.0,<2.6

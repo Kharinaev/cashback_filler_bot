@@ -1,12 +1,13 @@
 # Cashback Autocomplete Bot
 
-A Telegram bot that automates the process of categorizing and recording cashbacks using Vision Language Models (VLM) and Notion integration.
+A Telegram bot that automates the process of categorizing and recording
+cashbacks using Vision Language Models (VLM) and Google Sheets.
 
 ## Features
 
 - 📸 Process cashback screenshot automatically
 - 🤖 VLM-powered transaction categorization
-- 📊 Integration with Notion database
+- 📊 Integration with Google Sheets
 - 📱 Telegram interface
 - 💰 Cashback tracking and management
 
@@ -14,8 +15,8 @@ A Telegram bot that automates the process of categorizing and recording cashback
 
 - Python 3.8+
 - Telegram Bot Token
-- Notion API Key
-- Notion Database ID
+- Google Cloud service account key
+- Google Spreadsheet ID
 - VLM API access
 
 ## Installation
@@ -39,8 +40,10 @@ Create a configuration file (e.g., `configs/config.yaml`) with the following str
 
 ```yaml
 db:
-  api_key: "your-notion-api-key"
-  db_id: "your-notion-database-id"
+  credentials_file: "configs/google-service-account.json"
+  spreadsheet_id: "your-google-spreadsheet-id"
+  cashbacks_sheet: "Cashbacks"
+  categories_sheet: "Categories"
 
 vlm:
   base_url: "your-vlm-api-url"
@@ -78,7 +81,7 @@ cashback_autocomplete/
 │   ├── bot.py          # Telegram bot implementation
 │   ├── pipe.py         # Main processing pipeline
 │   ├── vlm.py          # Vision Language Model integration
-│   ├── notion_api.py   # Notion database interaction
+│   ├── google_sheets_api.py  # Google Sheets interaction
 │   └── tools.py        # Utility functions
 ├── configs/            # Configuration files
 ├── data/              # Data storage
@@ -87,20 +90,14 @@ cashback_autocomplete/
 └── artifacts/         # Generated artifacts
 ```
 
-## Data Structure
+## Spreadsheet structure
 
-The Notion database should have the following fields:
+The `Cashbacks` sheet uses these columns in order:
 
-### Required Fields
-- Category (multi-select)
-- Percent (number)
-- Bank (select)
-- Person (select)
-- Date (date)
+`Category | Percent | Bank | Person | Date | Limit, ₽ | Info`
 
-### Additional Fields
-- Limit, ₽ (number)
-- Info (text)
+The `Categories` sheet contains a single `Category` column with the allowed
+cashback categories.
 
 ## Development
 
@@ -138,6 +135,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - Telegram Bot API
-- Notion API
+- Google Sheets API
 - Vision Language Models
 - All contributors and maintainers

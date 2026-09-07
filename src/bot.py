@@ -113,7 +113,7 @@ async def handle_edit_callback(
 
     elif query.data == "confirm_edit":
         logger.info(f"User @{username} (ID: {user_id}) confirmed edits")
-        # Save to Notion DB
+        # Save to Google Sheets
         pipeline = context.bot_data.get("pipeline")
         if pipeline:
             try:
@@ -287,7 +287,7 @@ async def list_cashbacks(
 
     logger.info(f"List command for user @{username}")
     try:
-        rows = pipeline.notion.get_current_month_rows()
+        rows = pipeline.db.get_current_month_rows()
         if not rows:
             await update.message.reply_text(empty_message)
             return

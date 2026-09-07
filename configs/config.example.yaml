@@ -1,6 +1,8 @@
 db:
-  api_key: "YOUR_API_KEY_HERE"
-  db_id: "YOUR_DATABASE_ID_HERE"
+  credentials_file: "configs/google-service-account.json"
+  spreadsheet_id: "YOUR_SPREADSHEET_ID_HERE"
+  cashbacks_sheet: "Cashbacks"
+  categories_sheet: "Categories"
 
 vlm:
   api_token: "YOUR_VLM_API_TOKEN_HERE"

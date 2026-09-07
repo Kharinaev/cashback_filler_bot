@@ -18,6 +18,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/cashback_autocomplete/data
+ReadOnlyPaths=/opt/cashback_autocomplete/configs
 
 [Install]
 WantedBy=multi-user.target
