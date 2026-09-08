@@ -168,18 +168,14 @@ def apply_bank_to_edit(state, value):
     state.current_edit = None
 
 
-def edit_category_emojis(context):
-    pipeline = context.bot_data.get("pipeline")
-    return pipeline.db.get_category_emojis() if pipeline else {}
+def edit_category_emojis(pipeline):
+    return pipeline.db.get_category_emojis()
 
 
-async def handle_edit_bank_action(query, context, state):
+async def handle_edit_bank_action(query, state, pipeline):
     if query.data == "edit_bank":
         state.current_edit = ("bank", None)
-        pipeline = context.bot_data.get("pipeline")
-        state.bank_options = (
-            pipeline.db.get_reference_values("Bank") if pipeline else []
-        )
+        state.bank_options = pipeline.db.get_reference_values("Bank")
         await query.message.reply_text(
             "Выберите правильный банк или напишите свой вариант. "
             "Он применится ко всем строкам.",
@@ -202,7 +198,7 @@ async def handle_edit_bank_action(query, context, state):
         format_rows_preview(
             state.edited_rows,
             title,
-            edit_category_emojis(context),
+            edit_category_emojis(pipeline),
         ),
         parse_mode="HTML",
         reply_markup=create_edit_keyboard(state.edited_rows),
@@ -274,7 +270,7 @@ def create_edit_keyboard(rows):
 
 
 async def handle_edit_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pipeline
 ) -> None:
     query = update.callback_query
     await query.answer()
@@ -292,7 +288,7 @@ async def handle_edit_callback(
 
     if query.data.startswith("edit_bank"):
         logger.info(f"User @{username} (ID: {user_id}) started bank edit")
-        await handle_edit_bank_action(query, context, state)
+        await handle_edit_bank_action(query, state, pipeline)
 
     elif query.data.startswith("edit_category_"):
         row_idx = int(query.data.split("_")[2]) - 1
@@ -317,28 +313,24 @@ async def handle_edit_callback(
     elif query.data == "confirm_edit":
         logger.info(f"User @{username} (ID: {user_id}) confirmed edits")
         # Save to Google Sheets
-        pipeline = context.bot_data.get("pipeline")
-        if pipeline:
-            try:
-                saved, duplicates = pipeline.save_rows_to_database(
-                    state.edited_rows
-                )
-                logger.info(
-                    f"Successfully saved edited rows for user @{username} (ID: {user_id})"
-                )
-                await query.message.reply_text(
-                    save_result_message(saved, duplicates),
-                    reply_markup=main_menu_keyboard(),
-                )
-            except Exception:
-                logger.error(
-                    "Error saving changes for user @%s (ID: %s)",
-                    username,
-                    user_id,
-                )
-                await query.message.reply_text(
-                    "❌ Не удалось сохранить изменения."
-                )
+        try:
+            saved, duplicates = pipeline.save_rows_to_database(
+                state.edited_rows
+            )
+            logger.info(
+                f"Successfully saved edited rows for user @{username} (ID: {user_id})"
+            )
+            await query.message.reply_text(
+                save_result_message(saved, duplicates),
+                reply_markup=main_menu_keyboard(),
+            )
+        except Exception:
+            logger.error(
+                "Error saving changes for user @%s (ID: %s)",
+                username,
+                user_id,
+            )
+            await query.message.reply_text("❌ Не удалось сохранить изменения.")
         del edit_states[user_id]
 
     elif query.data == "cancel_edit":
@@ -350,7 +342,7 @@ async def handle_edit_callback(
 
 
 async def handle_edit_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pipeline
 ) -> None:
     user_id = update.effective_user.id
     username = update.effective_user.username
@@ -397,7 +389,7 @@ async def handle_edit_message(
         format_rows_preview(
             state.edited_rows,
             "Обновлённый результат",
-            edit_category_emojis(context),
+            edit_category_emojis(pipeline),
         ),
         parse_mode="HTML",
         reply_markup=create_edit_keyboard(state.edited_rows),
@@ -1486,7 +1478,7 @@ async def handle_text_message(
 ):
     edit_state = edit_states.get(update.effective_user.id)
     if edit_state and edit_state.current_edit:
-        await handle_edit_message(update, context)
+        await handle_edit_message(update, context, pipeline)
         return
     if update.effective_user.id in delete_states:
         await update.effective_message.reply_text(
@@ -1631,9 +1623,6 @@ async def handle_image(
             date=selected_month(context),
         )
 
-        # Store pipeline in bot_data for access in handlers
-        context.bot_data["pipeline"] = pipeline
-
         if not rows:
             await update.message.reply_text(
                 "На скриншоте категории не распознаны. "
@@ -1695,9 +1684,6 @@ def run_bot(cfg):
     allowed_users = {
         user["tg_username"]: user["db_username"] for user in cfg["bot"]["users"]
     }
-
-    # Store pipeline in bot_data
-    application.bot_data["pipeline"] = pipe
 
     application.add_handler(
         CommandHandler(
@@ -1830,7 +1816,7 @@ def run_bot(cfg):
     )
     application.add_handler(
         CallbackQueryHandler(
-            handle_edit_callback,
+            partial(handle_edit_callback, pipeline=pipe),
             pattern=r"^(edit_|confirm_edit|cancel_edit)",
         )
     )
