@@ -100,6 +100,33 @@ BANK_DISPLAY = {
 BANK_ORDER = ["Tinkoff", "Alfa", "Ozon"]
 
 
+HELP_MESSAGE = """<b>Что умеет бот</b>
+
+📸 <b>Распознавать скриншоты</b>
+Отправьте скриншот с кэшбэками. Бот определит банк, категории и проценты, предложит всё проверить и позволит исправить результат перед сохранением. Полные дубли не добавляются.
+
+🔎 <b>Искать категории</b>
+Напишите название категории обычным сообщением. Бот найдёт похожие категории выбранного месяца и покажет пользователя, банк, процент и карты для оплаты.
+
+➕ <b>/add — добавить категорию вручную</b>
+Последовательно выберите банк, категорию и процент или введите свои значения.
+
+📋 <b>/list — показать кэшбэки</b>
+Выводит категории выбранного месяца по пользователям и банкам вместе с картами.
+
+🗑 <b>/delete — удалить категории</b>
+Можно удалить одну запись или сразу все категории конкретного пользователя и банка за выбранный месяц.
+
+💳 <b>/cards — управлять картами</b>
+Добавление и удаление последних четырёх цифр карт.
+
+📅 <b>/month — выбрать рабочий месяц</b>
+В авторежиме до 25-го включительно используется текущий месяц, с 26-го — следующий. При необходимости можно зафиксировать месяц вручную.
+
+❌ <b>/cancel — отменить действие</b>
+🏠 <b>/start — открыть главное меню</b>"""
+
+
 def bank_label(bank):
     name, emoji = BANK_DISPLAY.get(bank, (bank or "—", "⚪️"))
     return f"{emoji} {name}"
@@ -489,6 +516,24 @@ async def start(
     else:
         await update.effective_message.reply_text(refuse_message)
         logger.info(f"Refused to user @{username}")
+
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    refuse_message: str = "",
+    allowed_users: dict = {},
+) -> None:
+    username = update.effective_user.username
+    if username not in allowed_users:
+        await update.effective_message.reply_text(refuse_message)
+        logger.info(f"Refused to user @{username}")
+        return
+    await update.effective_message.reply_text(
+        HELP_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 async def cancel_workflow(update, context):
@@ -1657,6 +1702,7 @@ async def configure_bot_commands(application):
     await application.bot.set_my_commands(
         [
             BotCommand("start", "Открыть меню"),
+            BotCommand("help", "Что умеет бот"),
             BotCommand("add", "Добавить категорию вручную"),
             BotCommand("delete", "Удалить запись"),
             BotCommand("cards", "Управление картами"),
@@ -1691,6 +1737,16 @@ def run_bot(cfg):
             partial(
                 start,
                 start_message=cfg["bot"]["messages"]["start_message"],
+                refuse_message=cfg["bot"]["messages"]["refuse_message"],
+                allowed_users=allowed_users,
+            ),
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            "help",
+            partial(
+                help_command,
                 refuse_message=cfg["bot"]["messages"]["refuse_message"],
                 allowed_users=allowed_users,
             ),

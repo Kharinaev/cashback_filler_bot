@@ -54,3 +54,18 @@ def test_screenshot_preview_groups_bank_and_shows_category_emojis():
     assert text.count("🟡 ТБанк") == 1
     assert "1. 🚕 Такси — 5%" in text
     assert "2. 💊 Аптеки — 3%" in text
+
+
+def test_help_lists_commands_and_automatic_month_rule():
+    for command in (
+        "/add",
+        "/list",
+        "/delete",
+        "/cards",
+        "/month",
+        "/cancel",
+        "/start",
+    ):
+        assert command in bot.HELP_MESSAGE
+    assert "с 26-го — следующий" in bot.HELP_MESSAGE
+    assert "Полные дубли не добавляются" in bot.HELP_MESSAGE
