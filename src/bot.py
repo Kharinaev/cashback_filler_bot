@@ -4,6 +4,7 @@ import os
 from functools import partial
 
 from src.bot_helpers import (
+    automatic_month_start,
     canonical_bank,
     frequent_values,
     month_start,
@@ -11,6 +12,7 @@ from src.bot_helpers import (
     parse_percent,
     search_category_rows,
 )
+from src.category_emojis import category_emoji
 from src.pipe import Pipeline
 from telegram import (
     BotCommand,
@@ -40,6 +42,7 @@ class EditState:
         self.db_username = db_username
         self.edited_rows = rows.copy()
         self.current_edit = None  # ('bank', None) or ('category', row_idx) or ('percent', row_idx)
+        self.bank_options = []
 
 
 class ManualAddState:
@@ -49,6 +52,7 @@ class ManualAddState:
         self.stage = "bank"
         self.bank = None
         self.category = None
+        self.emoji = None
         self.percent = None
         self.options = []
 
@@ -61,7 +65,9 @@ class DeleteState:
         self.person = None
         self.bank = None
         self.record = None
+        self.bulk = False
         self.options = []
+        self.category_emojis = {}
 
 
 class CardState:
@@ -108,18 +114,99 @@ def format_percent(percent):
     return f"{number:g}%"
 
 
-def format_rows_preview(rows, title="Проверьте распознанные категории"):
+def emoji_for_category(category, category_emojis=None, row=None):
+    if row and row.get("Emoji"):
+        return row["Emoji"]
+    if category_emojis and category in category_emojis:
+        return category_emojis[category]
+    return category_emoji(category)
+
+
+def category_label(category, category_emojis=None, row=None):
+    category = str(category or "—")
+    return f"{emoji_for_category(category, category_emojis, row)} {category}"
+
+
+def format_rows_preview(
+    rows,
+    title="Проверьте распознанные категории",
+    category_emojis=None,
+):
     lines = [f"<b>{html.escape(title)}</b>"]
+    grouped = {}
     for index, row in enumerate(rows, 1):
-        lines.extend(
-            [
-                "",
-                f"<b>{index}. {html.escape(str(row.get('Category') or '—'))}</b>"
-                f" — {html.escape(format_percent(row.get('Percent')))}",
-                f"{html.escape(bank_label(row.get('Bank')))}",
-            ]
-        )
+        grouped.setdefault(row.get("Bank"), []).append((index, row))
+    for bank, bank_rows in grouped.items():
+        lines.extend(["", f"<b>{html.escape(bank_label(bank))}</b>"])
+        for index, row in bank_rows:
+            label = category_label(row.get("Category"), category_emojis, row)
+            lines.append(
+                f"{index}. {html.escape(label)}"
+                f" — {html.escape(format_percent(row.get('Percent')))}"
+            )
     return "\n".join(lines)
+
+
+def edit_bank_keyboard(options):
+    buttons = [
+        InlineKeyboardButton(
+            bank_label(value), callback_data=f"edit_bank_option:{index}"
+        )
+        for index, value in enumerate(options)
+    ]
+    rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+    rows.append(
+        [InlineKeyboardButton("⬅️ Назад", callback_data="edit_bank_back")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def apply_bank_to_edit(state, value):
+    bank = canonical_bank(value)
+    for row in state.edited_rows:
+        row["Bank"] = bank
+    state.current_edit = None
+
+
+def edit_category_emojis(context):
+    pipeline = context.bot_data.get("pipeline")
+    return pipeline.db.get_category_emojis() if pipeline else {}
+
+
+async def handle_edit_bank_action(query, context, state):
+    if query.data == "edit_bank":
+        state.current_edit = ("bank", None)
+        pipeline = context.bot_data.get("pipeline")
+        state.bank_options = (
+            pipeline.db.get_reference_values("Bank") if pipeline else []
+        )
+        await query.message.reply_text(
+            "Выберите правильный банк или напишите свой вариант. "
+            "Он применится ко всем строкам.",
+            reply_markup=edit_bank_keyboard(state.bank_options),
+        )
+        return
+    if query.data == "edit_bank_back":
+        state.current_edit = None
+        title = "Результат без изменений"
+    else:
+        try:
+            index = int(query.data.split(":", 1)[1])
+            value = state.bank_options[index]
+        except (ValueError, IndexError):
+            await query.message.reply_text("Этот вариант уже неактуален.")
+            return
+        apply_bank_to_edit(state, value)
+        title = "Обновлённый результат"
+    await query.message.reply_text(
+        format_rows_preview(
+            state.edited_rows,
+            title,
+            edit_category_emojis(context),
+        ),
+        parse_mode="HTML",
+        reply_markup=create_edit_keyboard(state.edited_rows),
+    )
 
 
 def card_numbers(cards, person, bank):
@@ -203,12 +290,9 @@ async def handle_edit_callback(
         await query.message.reply_text("Сессия проверки уже завершена.")
         return
 
-    if query.data == "edit_bank":
+    if query.data.startswith("edit_bank"):
         logger.info(f"User @{username} (ID: {user_id}) started bank edit")
-        state.current_edit = ("bank", None)
-        await query.message.reply_text(
-            "Напишите правильное название банка. Оно применится ко всем строкам."
-        )
+        await handle_edit_bank_action(query, context, state)
 
     elif query.data.startswith("edit_category_"):
         row_idx = int(query.data.split("_")[2]) - 1
@@ -236,9 +320,6 @@ async def handle_edit_callback(
         pipeline = context.bot_data.get("pipeline")
         if pipeline:
             try:
-                for row in state.edited_rows:
-                    for field in ("Category", "Person", "Bank"):
-                        pipeline.db.ensure_reference_value(field, row[field])
                 saved, duplicates = pipeline.save_rows_to_database(
                     state.edited_rows
                 )
@@ -284,15 +365,14 @@ async def handle_edit_message(
     if edit_type == "bank":
         # Update bank for all rows
         old_value = state.edited_rows[0]["Bank"]
-        new_value = canonical_bank(new_value)
-        for row in state.edited_rows:
-            row["Bank"] = new_value
+        apply_bank_to_edit(state, new_value)
         logger.info(
             f"User @{username} (ID: {user_id}) changed bank from '{old_value}' to '{new_value}'"
         )
     elif edit_type == "category":
         old_value = state.edited_rows[row_idx]["Category"]
         state.edited_rows[row_idx]["Category"] = new_value
+        state.edited_rows[row_idx]["Emoji"] = category_emoji(new_value)
         logger.info(
             f"User @{username} (ID: {user_id}) changed category in row {row_idx + 1} from '{old_value}' to '{new_value}'"
         )
@@ -314,7 +394,11 @@ async def handle_edit_message(
             return
 
     await update.message.reply_text(
-        format_rows_preview(state.edited_rows, "Обновлённый результат"),
+        format_rows_preview(
+            state.edited_rows,
+            "Обновлённый результат",
+            edit_category_emojis(context),
+        ),
         parse_mode="HTML",
         reply_markup=create_edit_keyboard(state.edited_rows),
     )
@@ -342,12 +426,12 @@ def main_menu_keyboard():
 
 
 def selected_month(context):
-    return context.user_data.get("target_month") or month_start()
+    return context.user_data.get("target_month") or automatic_month_start()
 
 
 def selected_month_label(context):
     value = context.user_data.get("target_month")
-    return value[:7] if value else f"{month_start()[:7]} (авто)"
+    return value[:7] if value else f"{automatic_month_start()[:7]} (авто)"
 
 
 def option_keyboard(
@@ -433,7 +517,7 @@ async def cancel_workflow(update, context):
     )
 
 
-def format_cashback_list(rows, cards):
+def format_cashback_list(rows, cards, category_emojis=None):
     # Group rows by (person, bank)
     groups = {}
     for row in rows:
@@ -457,7 +541,7 @@ def format_cashback_list(rows, cards):
             "",
         ]
         for i, row in enumerate(group, 1):
-            category = row["Category"] or "—"
+            category = category_label(row["Category"], category_emojis, row)
             lines.append(f"{i}. {category} — {format_percent(row['Percent'])}")
         blocks.append("\n".join(lines))
 
@@ -521,6 +605,11 @@ def category_options(pipeline, state):
     return merge_options(personal, bank, all_categories)
 
 
+def category_option_labels(pipeline, options):
+    emojis = pipeline.db.get_category_emojis()
+    return [category_label(value, emojis) for value in options]
+
+
 def percent_options(pipeline, state):
     rows = pipeline.db.get_all_rows()
     frequent = frequent_values(
@@ -543,7 +632,10 @@ async def set_manual_bank(update, state, value, pipeline):
     await update.effective_message.reply_text(
         "Выберите частую категорию или напишите свою:",
         reply_markup=option_keyboard(
-            "manual:category", state.options, back=True
+            "manual:category",
+            state.options,
+            back=True,
+            labels=category_option_labels(pipeline, state.options),
         ),
     )
 
@@ -553,6 +645,9 @@ async def set_manual_category(update, state, value, pipeline):
     if not state.category:
         await update.effective_message.reply_text("Название категории пустое.")
         return
+    state.emoji = pipeline.db.get_category_emojis().get(
+        state.category, category_emoji(state.category)
+    )
     state.stage = "percent"
     state.options = percent_options(pipeline, state)
     await update.effective_message.reply_text(
@@ -579,7 +674,7 @@ async def set_manual_percent(update, state, value):
         "Проверьте запись:\n"
         f"• пользователь: {state.person}\n"
         f"• банк: {bank_label(state.bank)}\n"
-        f"• категория: {state.category}\n"
+        f"• категория: {category_label(state.category, row={'Emoji': state.emoji})}\n"
         f"• процент: {format_percent(state.percent)}\n"
         f"• месяц: {state.date[:7]}",
         reply_markup=InlineKeyboardMarkup(
@@ -623,14 +718,13 @@ async def save_manual_cashback(update, state, pipeline):
         return
     row = {
         "Category": state.category,
+        "Emoji": state.emoji,
         "Percent": state.percent,
         "Bank": state.bank,
         "Person": state.person,
         "Date": state.date,
     }
     try:
-        for field in ("Category", "Person", "Bank"):
-            pipeline.db.ensure_reference_value(field, row[field])
         saved, duplicates = pipeline.save_rows_to_database([row])
     except Exception:
         logger.error(
@@ -699,7 +793,10 @@ async def handle_manual_callback(update, context, pipeline):
             await query.message.reply_text(
                 "Выберите категорию или напишите свою:",
                 reply_markup=option_keyboard(
-                    "manual:category", state.options, back=True
+                    "manual:category",
+                    state.options,
+                    back=True,
+                    labels=category_option_labels(pipeline, state.options),
                 ),
             )
         elif state.stage == "category":
@@ -784,30 +881,44 @@ async def show_delete_records(message, state):
     state.stage = "record"
     state.options = delete_records(state)
     labels = [
-        f"{row['Category']} · {format_percent(row['Percent'])}"
+        f"{category_label(row['Category'], state.category_emojis, row)} · "
+        f"{format_percent(row['Percent'])}"
         for _, row in state.options
     ]
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"delete:record:{index}")]
+        for index, label in enumerate(labels)
+    ]
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                f"🗑 Удалить все ({len(state.options)})",
+                callback_data="delete:all",
+            )
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="delete:back"),
+            InlineKeyboardButton("❌ Отмена", callback_data="delete:cancel"),
+        ]
+    )
     await message.reply_text(
         f"{state.person} · {bank_label(state.bank)}\n"
-        "Выберите запись для удаления:",
-        reply_markup=option_keyboard(
-            "delete:record",
-            state.options,
-            columns=1,
-            back=True,
-            labels=labels,
-        ),
+        "Выберите одну запись или удалите все категории банка:",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 async def show_delete_confirmation(message, state):
     _, row = state.record
+    state.bulk = False
     state.stage = "confirm"
     await message.reply_text(
         "<b>Удалить эту запись?</b>\n\n"
         f"👤 {html.escape(str(row['Person']))}\n"
         f"{html.escape(bank_label(row['Bank']))}\n"
-        f"🏷 {html.escape(str(row['Category']))}\n"
+        f"{html.escape(category_label(row['Category'], state.category_emojis, row))}\n"
         f"💳 {html.escape(format_percent(row['Percent']))}\n"
         f"📅 {html.escape(str(row['Date'])[:7])}",
         parse_mode="HTML",
@@ -816,6 +927,44 @@ async def show_delete_confirmation(message, state):
                 [
                     InlineKeyboardButton(
                         "🗑 Удалить", callback_data="delete:confirm"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Отмена", callback_data="delete:cancel"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="delete:back")],
+            ]
+        ),
+    )
+
+
+async def show_bulk_delete_confirmation(message, state):
+    state.bulk = True
+    state.stage = "confirm"
+    records = delete_records(state)
+    lines = [
+        "<b>Удалить все категории этого банка?</b>",
+        "",
+        f"👤 {html.escape(str(state.person))}",
+        f"{html.escape(bank_label(state.bank))}",
+        f"📅 {html.escape(state.date[:7])}",
+        f"Записей: {len(records)}",
+        "",
+    ]
+    lines.extend(
+        f"• {html.escape(category_label(row['Category'], state.category_emojis, row))}"
+        f" — {html.escape(format_percent(row['Percent']))}"
+        for _, row in records
+    )
+    await message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"🗑 Удалить все ({len(records)})",
+                        callback_data="delete:confirm",
                     ),
                     InlineKeyboardButton(
                         "❌ Отмена", callback_data="delete:cancel"
@@ -849,12 +998,14 @@ async def begin_delete(
     card_states.pop(update.effective_user.id, None)
     edit_states.pop(update.effective_user.id, None)
     state = DeleteState(date, rows)
+    state.category_emojis = pipeline.db.get_category_emojis()
     delete_states[update.effective_user.id] = state
     await show_delete_people(update.effective_message, state)
 
 
 async def go_back_in_delete(message, state):
     if state.stage == "confirm":
+        state.bulk = False
         await show_delete_records(message, state)
     elif state.stage == "record":
         await show_delete_banks(message, state)
@@ -863,12 +1014,17 @@ async def go_back_in_delete(message, state):
 
 
 async def confirm_delete(message, user_id, state, pipeline):
-    if state.stage != "confirm" or not state.record:
+    if state.stage != "confirm" or (not state.record and not state.bulk):
         await message.reply_text("Сначала выберите запись.")
         return
-    row_number, row = state.record
     try:
-        pipeline.db.delete_row(row_number, row)
+        if state.bulk:
+            records = delete_records(state)
+            deleted_count = pipeline.db.delete_rows(records)
+        else:
+            row_number, row = state.record
+            pipeline.db.delete_row(row_number, row)
+            deleted_count = 1
     except ValueError:
         logger.warning(
             "Cashback row changed before deletion for user %s", user_id
@@ -885,7 +1041,12 @@ async def confirm_delete(message, user_id, state, pipeline):
         return
     delete_states.pop(user_id, None)
     await message.reply_text(
-        "✅ Запись удалена.", reply_markup=main_menu_keyboard()
+        (
+            f"✅ Удалено записей: {deleted_count}."
+            if deleted_count != 1
+            else "✅ Запись удалена."
+        ),
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -927,6 +1088,12 @@ async def handle_delete_callback(update, context, pipeline):
         return
     if action == "back":
         await go_back_in_delete(query.message, state)
+        return
+    if action == "all":
+        if state.stage != "record" or not state.options:
+            await query.message.reply_text("Этот вариант уже неактуален.")
+            return
+        await show_bulk_delete_confirmation(query.message, state)
         return
     if action == "confirm":
         await confirm_delete(query.message, user_id, state, pipeline)
@@ -1230,12 +1397,12 @@ async def handle_cards_callback(
 def month_keyboard():
     buttons = [
         InlineKeyboardButton(
-            "🔄 Авто: текущий месяц", callback_data="month:auto"
+            "🔄 Авто: после 25-го → следующий", callback_data="month:auto"
         )
     ]
     buttons.extend(
         InlineKeyboardButton(value[:7], callback_data=f"month:{value[:7]}")
-        for value in (month_start(-offset) for offset in range(12))
+        for value in (month_start(offset) for offset in range(1, -12, -1))
     )
     rows = [[buttons[0]]]
     rows.extend(
@@ -1256,7 +1423,9 @@ async def choose_month(update, context, allowed_users, refuse_message):
     edit_states.pop(user_id, None)
     await update.effective_message.reply_text(
         f"Рабочий месяц: {selected_month_label(context)}\n"
-        "Он используется для фото, ручных записей, списка, поиска и удаления.",
+        "Он используется для фото, ручных записей, списка, поиска и удаления.\n"
+        "В авторежиме до 25-го включительно выбирается текущий месяц, "
+        "с 26-го — следующий.",
         reply_markup=month_keyboard(),
     )
 
@@ -1289,6 +1458,7 @@ async def search_cashbacks(
     month = selected_month(context)
     rows = pipeline.db.get_month_rows(month)
     cards = pipeline.db.get_cards()
+    category_emojis = pipeline.db.get_category_emojis()
     matches = search_category_rows(rows, update.effective_message.text)
     if not matches:
         await update.effective_message.reply_text(
@@ -1299,7 +1469,8 @@ async def search_cashbacks(
     for row in matches:
         numbers = card_numbers(cards, row["Person"], row["Bank"])
         lines.append(
-            f"• {row['Category']} — {row['Person']}, {bank_label(row['Bank'])}, "
+            f"• {category_label(row['Category'], category_emojis, row)} — "
+            f"{row['Person']}, {bank_label(row['Bank'])}, "
             f"{format_percent(row['Percent'])}\n"
             f"  {format_cards_line(numbers)}"
         )
@@ -1361,9 +1532,10 @@ async def list_cashbacks(
             return
 
         cards = pipeline.db.get_cards()
+        category_emojis = pipeline.db.get_category_emojis()
         message = (
             f"Кэшбэки за {selected_month(context)[:7]}:\n\n"
-            f"{format_cashback_list(rows, cards)}"
+            f"{format_cashback_list(rows, cards, category_emojis)}"
         )
         await update.effective_message.reply_text(
             message, reply_markup=main_menu_keyboard()
@@ -1478,7 +1650,9 @@ async def handle_image(
         )
 
         await update.message.reply_text(
-            format_rows_preview(rows),
+            format_rows_preview(
+                rows, category_emojis=pipeline.db.get_category_emojis()
+            ),
             parse_mode="HTML",
             reply_markup=create_edit_keyboard(rows),
         )

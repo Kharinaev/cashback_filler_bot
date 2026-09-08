@@ -19,11 +19,11 @@ def test_cashback_list_includes_all_cards_for_person_and_bank():
         {"Person": "Алёна", "Bank": "Alfa", "Card": "5555"},
     ]
 
-    text = bot.format_cashback_list(rows, cards)
+    text = bot.format_cashback_list(rows, cards, {"Транспорт": "🚌"})
 
     assert "👤 Алёна · 🟡 ТБанк" in text
     assert "Карты 0123, 9876" in text
-    assert "1. Транспорт — 5%" in text
+    assert "1. 🚌 Транспорт — 5%" in text
     assert "5555" not in text
 
 
@@ -31,3 +31,26 @@ def test_duplicate_message_reports_saved_and_skipped_counts():
     assert bot.save_result_message([{}], [{}, {}]) == (
         "✅ Сохранено записей: 1.\nℹ️ Полных дублей пропущено: 2."
     )
+
+
+def test_screenshot_preview_groups_bank_and_shows_category_emojis():
+    rows = [
+        {
+            "Bank": "Tinkoff",
+            "Category": "Такси",
+            "Emoji": "🚕",
+            "Percent": 5,
+        },
+        {
+            "Bank": "Tinkoff",
+            "Category": "Аптеки",
+            "Emoji": "💊",
+            "Percent": 3,
+        },
+    ]
+
+    text = bot.format_rows_preview(rows)
+
+    assert text.count("🟡 ТБанк") == 1
+    assert "1. 🚕 Такси — 5%" in text
+    assert "2. 💊 Аптеки — 3%" in text

@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 
+from src.category_emojis import normalize_category_emoji
 from src.google_sheets_api import GoogleSheetsDB
 from src.tools import encode_image, process_response, resize_image
 from src.vlm import VLM
@@ -33,8 +34,11 @@ class Pipeline:
         self.sampling_params = cfg["vlm"]["sampling_params"]
 
     def __call__(self, image_path, person, date=None):
-        unique_categories = self.db.get_unique_categories()
-        logger.info(f"Unique categories: {unique_categories}")
+        unique_categories = self.db.get_categories_with_emojis()
+        existing_emojis = {
+            item["Category"]: item["Emoji"] for item in unique_categories
+        }
+        logger.info("Loaded %s categories for VLM", len(unique_categories))
         prompt = self.prompt_template.replace(
             "{CASHBACK_CATEGORIES}", str(unique_categories)
         )
@@ -53,6 +57,9 @@ class Pipeline:
 
         rows = process_response(response.choices[0].message.content)
         for row in rows:
+            row["Emoji"] = existing_emojis.get(
+                row.get("Category")
+            ) or normalize_category_emoji(row.get("Emoji"), row.get("Category"))
             row["Person"] = person
             row["Date"] = date
 
@@ -61,6 +68,12 @@ class Pipeline:
 
     def save_rows_to_database(self, rows):
         """Save processed rows to Google Sheets."""
+        for row in rows:
+            self.db.ensure_reference_value(
+                "Category", row["Category"], emoji=row.get("Emoji")
+            )
+            self.db.ensure_reference_value("Person", row["Person"])
+            self.db.ensure_reference_value("Bank", row["Bank"])
         saved, duplicates = self.db.add_rows_if_new(rows)
         logger.info(
             "Rows added to Google Sheets: %s; duplicates skipped: %s",

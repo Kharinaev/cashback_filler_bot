@@ -4,6 +4,7 @@ from pathlib import Path
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from src.bot_helpers import parse_card_last4
+from src.category_emojis import normalize_category_emoji
 from src.sheet_colors import conditional_color_rule, value_color
 
 
@@ -18,6 +19,7 @@ class GoogleSheetsDB:
         "Info",
     ]
     CARD_COLUMNS = ["Person", "Bank", "Card"]
+    CATEGORY_COLUMNS = ["Category", "Person", "Bank", "Emoji"]
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
     def __init__(
@@ -51,6 +53,7 @@ class GoogleSheetsDB:
             "Date",
         ]
         self._ensure_cards_sheet()
+        self._ensure_category_emoji_column()
         self._validate_schema()
 
     @staticmethod
@@ -79,12 +82,15 @@ class GoogleSheetsDB:
         )
         categories_header = self._get_values(
             self.categories_sheet,
-            "A1:A1",
+            "A1:D1",
         )
         cards_header = self._get_values(self.cards_sheet, "A1:C1")
         if not cashbacks_header or cashbacks_header[0] != self.COLUMNS:
             raise ValueError("Cashbacks sheet has an unexpected header")
-        if not categories_header or categories_header[0] != ["Category"]:
+        if (
+            not categories_header
+            or categories_header[0] != self.CATEGORY_COLUMNS
+        ):
             raise ValueError("Categories sheet has an unexpected header")
         if not cards_header or cards_header[0] != self.CARD_COLUMNS:
             raise ValueError("Cards sheet has an unexpected header")
@@ -121,8 +127,38 @@ class GoogleSheetsDB:
                 body={"values": [self.CARD_COLUMNS]},
             ).execute()
 
+    def _ensure_category_emoji_column(self):
+        header = self._get_values(self.categories_sheet, "A1:D1")
+        if not header:
+            return
+        padded = header[0] + [""] * (4 - len(header[0]))
+        if padded[:3] == self.CATEGORY_COLUMNS[:3] and not padded[3]:
+            self.client.spreadsheets().values().update(
+                spreadsheetId=self.spreadsheet_id,
+                range=self._range(self.categories_sheet, "D1"),
+                valueInputOption="RAW",
+                body={"values": [["Emoji"]]},
+            ).execute()
+
     def get_unique_categories(self):
         return self.get_reference_values("Category")
+
+    def get_category_emojis(self):
+        values = self._get_values(self.categories_sheet, "A2:D")
+        result = {}
+        for row in values:
+            category = str(row[0]).strip() if row else ""
+            emoji = str(row[3]).strip() if len(row) > 3 else ""
+            if category:
+                result[category] = normalize_category_emoji(emoji, category)
+        return result
+
+    def get_categories_with_emojis(self):
+        emojis = self.get_category_emojis()
+        return [
+            {"Category": category, "Emoji": emoji}
+            for category, emoji in emojis.items()
+        ]
 
     def get_reference_values(self, field):
         columns = {"Category": "A", "Person": "B", "Bank": "C"}
@@ -142,10 +178,19 @@ class GoogleSheetsDB:
                 seen.add(value)
         return result
 
-    def ensure_reference_value(self, field, value):
+    def ensure_reference_value(self, field, value, emoji=None):
         value = str(value).strip()
         existing = self.get_reference_values(field)
-        if not value or value in existing:
+        if not value:
+            return
+        if value in existing:
+            if field == "Category" and emoji:
+                row_number = existing.index(value) + 2
+                current = self._get_values(
+                    self.categories_sheet, f"D{row_number}:D{row_number}"
+                )
+                if not current or not str(current[0][0]).strip():
+                    self._write_category_emoji(row_number, emoji, value)
             return
         columns = {"Category": "A", "Person": "B", "Bank": "C"}
         column = columns[field]
@@ -164,7 +209,18 @@ class GoogleSheetsDB:
             )
             .execute()
         )
+        if field == "Category":
+            self._write_category_emoji(next_row, emoji, value)
         self._add_reference_color(field, value)
+
+    def _write_category_emoji(self, row_number, emoji, category):
+        normalized = normalize_category_emoji(emoji, category)
+        self.client.spreadsheets().values().update(
+            spreadsheetId=self.spreadsheet_id,
+            range=self._range(self.categories_sheet, f"D{row_number}"),
+            valueInputOption="RAW",
+            body={"values": [[normalized]]},
+        ).execute()
 
     def _add_reference_color(self, field, value):
         target_columns = {"Category": 0, "Person": 3, "Bank": 2}
@@ -263,7 +319,7 @@ class GoogleSheetsDB:
             return str(int(value))
         return str(value).strip()
 
-    def _delete_sheet_row(self, sheet_name, columns, row_number, expected_row):
+    def _check_sheet_row(self, sheet_name, columns, row_number, expected_row):
         current = self._get_values(
             sheet_name,
             f"A{row_number}:{chr(64 + len(columns))}{row_number}",
@@ -277,6 +333,7 @@ class GoogleSheetsDB:
         ]:
             raise ValueError("The selected row changed")
 
+    def _sheet_id(self, sheet_name):
         metadata = (
             self.client.spreadsheets()
             .get(
@@ -285,11 +342,15 @@ class GoogleSheetsDB:
             )
             .execute()
         )
-        sheet_id = next(
+        return next(
             sheet_item["properties"]["sheetId"]
             for sheet_item in metadata["sheets"]
             if sheet_item["properties"]["title"] == sheet_name
         )
+
+    def _delete_sheet_row(self, sheet_name, columns, row_number, expected_row):
+        self._check_sheet_row(sheet_name, columns, row_number, expected_row)
+        sheet_id = self._sheet_id(sheet_name)
         (
             self.client.spreadsheets()
             .batchUpdate(
@@ -321,6 +382,40 @@ class GoogleSheetsDB:
             row_number,
             expected_row,
         )
+
+    def delete_rows(self, rows):
+        if not rows:
+            return 0
+        seen = set()
+        for row_number, row in rows:
+            self.check_row_data(row)
+            if row_number in seen:
+                raise ValueError("Duplicate row selected")
+            seen.add(row_number)
+            self._check_sheet_row(
+                self.cashbacks_sheet, self.COLUMNS, row_number, row
+            )
+        sheet_id = self._sheet_id(self.cashbacks_sheet)
+        requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": row_number - 1,
+                        "endIndex": row_number,
+                    }
+                }
+            }
+            for row_number, _ in sorted(
+                rows, key=lambda item: item[0], reverse=True
+            )
+        ]
+        self.client.spreadsheets().batchUpdate(
+            spreadsheetId=self.spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+        return len(rows)
 
     def check_row_data(self, row_data):
         for field in self.required_fields:

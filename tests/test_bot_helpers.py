@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 from src.bot_helpers import (
+    automatic_month_start,
     canonical_bank,
     category_match_score,
     frequent_values,
@@ -10,6 +11,7 @@ from src.bot_helpers import (
     parse_percent,
     search_category_rows,
 )
+from src.category_emojis import category_emoji, normalize_category_emoji
 from src.sheet_colors import value_color
 
 
@@ -80,6 +82,26 @@ def test_month_start_handles_year_boundary():
     now = datetime(2026, 1, 15)
     assert month_start(0, now) == "2026-01-01"
     assert month_start(-1, now) == "2025-12-01"
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 9, 25, 23, 59), "2026-09-01"),
+        (datetime(2026, 9, 26, 0, 0), "2026-10-01"),
+        (datetime(2026, 12, 31), "2027-01-01"),
+    ],
+)
+def test_automatic_month_rolls_over_after_25th(now, expected):
+    assert automatic_month_start(now) == expected
+
+
+def test_category_emojis_are_semantic_and_invalid_vlm_value_falls_back():
+    assert category_emoji("Супермаркеты в Городе") == "🛒"
+    assert category_emoji("Аптеки") == "💊"
+    assert normalize_category_emoji("🚕", "Такси") == "🚕"
+    assert normalize_category_emoji("taxi", "Такси") == "🚕"
+    assert normalize_category_emoji(None, "Аптеки") == "💊"
 
 
 def test_colors_are_stable_and_banks_have_distinct_colors():

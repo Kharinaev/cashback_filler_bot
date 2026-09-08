@@ -7,7 +7,7 @@ cashbacks using Vision Language Models (VLM) and Google Sheets.
 
 - 📸 Process cashback screenshot automatically
 - ➕ Add cashback categories manually with guided Telegram buttons
-- 📅 Choose a fixed working month or return to the current month automatically
+- 📅 Choose a fixed working month or use automatic rollover after the 25th
 - 🔎 Find similar categories in the current month from any text message
 - 💳 Manage card last-four digits and show them in lists and search results
 - 🧹 Skip exact duplicate cashback rows
@@ -104,7 +104,7 @@ The `Cashbacks` sheet uses these columns in order:
 
 The `Categories` sheet is the editable dropdown reference table:
 
-`Category | Person | Bank`
+`Category | Person | Bank | Emoji`
 
 The `Cards` sheet stores only card last-four digits:
 

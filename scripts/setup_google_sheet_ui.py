@@ -1,6 +1,7 @@
 import argparse
 
 import yaml
+from src.category_emojis import normalize_category_emoji
 from src.google_sheets_api import GoogleSheetsDB
 from src.sheet_colors import conditional_color_rule, value_color
 
@@ -217,13 +218,22 @@ def main():
         ";" if properties.get("locale", "").startswith("ru") else ","
     )
     values = database._get_values(database.cashbacks_sheet, "A2:G")
-    references = database._get_values(database.categories_sheet, "A2:C")
+    references = database._get_values(database.categories_sheet, "A2:D")
     cards_values = database._get_values(database.cards_sheet, "A2:C")
 
     configured_people = [
         user["db_username"] for user in config["bot"].get("users", [])
     ]
     categories = unique_strings(column(references, 0))
+    existing_emojis = {
+        str(row[0]).strip(): str(row[3]).strip()
+        for row in references
+        if row and str(row[0]).strip() and len(row) > 3
+    }
+    category_emojis = [
+        normalize_category_emoji(existing_emojis.get(category), category)
+        for category in categories
+    ]
     people = unique_strings(
         column(references, 1) + column(values, 3) + configured_people
     )
@@ -234,13 +244,13 @@ def main():
     values_api = database.client.spreadsheets().values()
     values_api.update(
         spreadsheetId=database.spreadsheet_id,
-        range=database._range(database.categories_sheet, "A1:C1"),
+        range=database._range(database.categories_sheet, "A1:D1"),
         valueInputOption="RAW",
-        body={"values": [["Category", "Person", "Bank"]]},
+        body={"values": [database.CATEGORY_COLUMNS]},
     ).execute()
     values_api.clear(
         spreadsheetId=database.spreadsheet_id,
-        range=database._range(database.categories_sheet, "A2:C"),
+        range=database._range(database.categories_sheet, "A2:D"),
         body={},
     ).execute()
     values_api.update(
@@ -260,6 +270,12 @@ def main():
         range=database._range(database.categories_sheet, "C2"),
         valueInputOption="RAW",
         body={"values": [[value] for value in banks]},
+    ).execute()
+    values_api.update(
+        spreadsheetId=database.spreadsheet_id,
+        range=database._range(database.categories_sheet, "D2"),
+        valueInputOption="RAW",
+        body={"values": [[value] for value in category_emojis]},
     ).execute()
 
     metadata = (
@@ -331,10 +347,10 @@ def main():
     requests.extend(
         [
             header_format(cashbacks_id, 7),
-            header_format(dictionaries_id, 3),
+            header_format(dictionaries_id, 4),
             header_format(cards_id, 3),
             banding_request(cashbacks_id, TARGET_ROWS, 7),
-            banding_request(dictionaries_id, REFERENCE_ROWS, 3),
+            banding_request(dictionaries_id, REFERENCE_ROWS, 4),
             banding_request(cards_id, REFERENCE_ROWS, 3),
             validation_request(
                 cashbacks_id,
@@ -406,7 +422,7 @@ def main():
     )
     requests.extend(
         dimension_request(dictionaries_id, index, width)
-        for index, width in enumerate([230, 140, 120])
+        for index, width in enumerate([230, 140, 120, 80])
     )
     requests.extend(
         dimension_request(cards_id, index, width)

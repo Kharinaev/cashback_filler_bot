@@ -2,6 +2,7 @@ import re
 from collections import Counter
 from datetime import datetime
 from difflib import SequenceMatcher
+from zoneinfo import ZoneInfo
 
 
 def normalize_text(value):
@@ -98,7 +99,12 @@ def parse_percent(value):
 
 
 def month_start(offset=0, now=None):
-    current = now or datetime.now()
+    current = now or datetime.now(ZoneInfo("Europe/Moscow"))
     month_index = current.year * 12 + current.month - 1 + offset
     year, zero_based_month = divmod(month_index, 12)
     return f"{year:04d}-{zero_based_month + 1:02d}-01"
+
+
+def automatic_month_start(now=None):
+    current = now or datetime.now(ZoneInfo("Europe/Moscow"))
+    return month_start(1 if current.day > 25 else 0, current)
